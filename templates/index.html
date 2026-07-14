@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Zendesk Ticket Print</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='print.css') }}">
+</head>
+<body class="lookup-page">
+  <main class="lookup-card">
+    <h1>Zendesk Ticket Print</h1>
+    <p class="tagline">Enter a ticket ID to generate a one-page summary sheet.</p>
+
+    {% if missing %}
+    <div class="notice warn">
+      <strong>Setup needed:</strong> missing environment variable{{ 's' if missing|length > 1 }}
+      <code>{{ missing|join('</code>, <code>')|safe }}</code>.
+      Copy <code>.env.example</code> to <code>.env</code>, fill in the values, and restart the app.
+    </div>
+    {% endif %}
+
+    {% if error %}
+    <div class="notice warn">{{ error }}</div>
+    {% endif %}
+
+    <form action="{{ url_for('lookup') }}" method="get" class="lookup-form">
+      <input type="text" name="ticket_id" placeholder="Ticket ID or ticket URL" autofocus required>
+      <button type="submit">Generate sheet</button>
+    </form>
+  </main>
+</body>
+</html>

@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Ticket #{{ ticket.id }} — {{ ticket.subject or 'Zendesk ticket' }}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='print.css') }}">
+</head>
+<body class="sheet-page">
+  <div class="toolbar no-print">
+    <a href="{{ url_for('index') }}">&larr; New lookup</a>
+    <button onclick="window.print()">Print / Save as PDF</button>
+  </div>
+
+  <article class="sheet">
+    <header class="sheet-header">
+      <div class="header-top">
+        <span class="ticket-id">Ticket #{{ ticket.id }}</span>
+        <span class="badges">
+          <span class="badge status-{{ ticket.status }}">{{ ticket.status|capitalize }}</span>
+          {% if ticket.priority %}<span class="badge">{{ ticket.priority|capitalize }} priority</span>{% endif %}
+          {% if ticket.type %}<span class="badge">{{ ticket.type|capitalize }}</span>{% endif %}
+        </span>
+      </div>
+      <h1>{{ ticket.subject or '(no subject)' }}</h1>
+      <div class="meta">
+        Created {{ ticket.created_at|datefmt }} &middot; Updated {{ ticket.updated_at|datefmt }}
+        {% if ticket.via and ticket.via.channel %} &middot; via {{ ticket.via.channel }}{% endif %}
+        {% if form %} &middot; Form: {{ form.display_name or form.name }}{% endif %}
+      </div>
+    </header>
+
+    <section class="columns">
+      <div class="panel">
+        <h2>Customer</h2>
+        <dl>
+          <dt>Name</dt><dd>{{ requester.name if requester else '—' }}</dd>
+          <dt>Email</dt><dd>{{ requester.email if requester and requester.email else '—' }}</dd>
+          {% if requester and requester.phone %}<dt>Phone</dt><dd>{{ requester.phone }}</dd>{% endif %}
+          <dt>Organization</dt><dd>{{ organization.name if organization else '—' }}</dd>
+        </dl>
+      </div>
+
+      <div class="panel">
+        <h2>Product information</h2>
+        {% if custom_fields %}
+        <dl>
+          {% for field in custom_fields %}
+          <dt>{{ field.title }}</dt><dd>{{ field.value }}</dd>
+          {% endfor %}
+        </dl>
+        {% else %}
+        <p class="empty">No product fields set on this ticket.</p>
+        {% endif %}
+      </div>
+    </section>
+
+    <section class="panel summary">
+      <h2>Issue summary</h2>
+      {% if summary %}
+        <p>{{ summary.issue_summary }}</p>
+        {% if summary.key_points %}
+        <h3>Key points</h3>
+        <ul>
+          {% for point in summary.key_points %}<li>{{ point }}</li>{% endfor %}
+        </ul>
+        {% endif %}
+        {% if summary.current_status %}
+        <h3>Current status</h3>
+        <p>{{ summary.current_status }}</p>
+        {% endif %}
+        {% if summary.product_context %}
+        <h3>Product context</h3>
+        <p>{{ summary.product_context }}</p>
+        {% endif %}
+      {% else %}
+        <div class="notice warn">{{ summary_error or 'AI summary unavailable.' }}</div>
+      {% endif %}
+    </section>
+
+    <footer class="sheet-footer">
+      Generated {{ generated_at.strftime('%b %d, %Y %H:%M UTC') }} &middot;
+      Summary based on {{ comment_count }} message{{ 's' if comment_count != 1 }} in the conversation
+    </footer>
+  </article>
+</body>
+</html>

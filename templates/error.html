@@ -1,0 +1,16 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Ticket {{ ticket_id }} — error</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='print.css') }}">
+</head>
+<body class="lookup-page">
+  <main class="lookup-card">
+    <h1>Couldn't load ticket {{ ticket_id }}</h1>
+    <div class="notice warn">{{ message }}</div>
+    <p><a href="{{ url_for('index') }}">&larr; Try another ticket</a></p>
+  </main>
+</body>
+</html>
