@@ -30,29 +30,27 @@
       </div>
     </header>
 
-    <section class="columns">
-      <div class="panel">
-        <h2>Customer</h2>
-        <dl>
-          <dt>Name</dt><dd>{{ requester.name if requester else '—' }}</dd>
-          <dt>Email</dt><dd>{{ requester.email if requester and requester.email else '—' }}</dd>
-          {% if requester and requester.phone %}<dt>Phone</dt><dd>{{ requester.phone }}</dd>{% endif %}
-          <dt>Organization</dt><dd>{{ organization.name if organization else '—' }}</dd>
-        </dl>
-      </div>
+    <section class="panel">
+      <h2>Customer</h2>
+      <dl class="fields">
+        <div class="field"><dt>Name</dt><dd>{{ requester.name if requester else '—' }}</dd></div>
+        <div class="field"><dt>Email</dt><dd>{{ requester.email if requester and requester.email else '—' }}</dd></div>
+        {% if requester and requester.phone %}<div class="field"><dt>Phone</dt><dd>{{ requester.phone }}</dd></div>{% endif %}
+        <div class="field"><dt>Organization</dt><dd>{{ organization.name if organization else '—' }}</dd></div>
+      </dl>
+    </section>
 
-      <div class="panel">
-        <h2>Product information</h2>
-        {% if custom_fields %}
-        <dl>
-          {% for field in custom_fields %}
-          <dt>{{ field.title }}</dt><dd>{{ field.value }}</dd>
-          {% endfor %}
-        </dl>
-        {% else %}
-        <p class="empty">No product fields set on this ticket.</p>
-        {% endif %}
-      </div>
+    <section class="panel">
+      <h2>Product information</h2>
+      {% if custom_fields %}
+      <dl class="fields">
+        {% for field in custom_fields %}
+        <div class="field"><dt>{{ field.title }}</dt><dd>{{ field.value }}</dd></div>
+        {% endfor %}
+      </dl>
+      {% else %}
+      <p class="empty">No product fields set on this ticket.</p>
+      {% endif %}
     </section>
 
     <section class="panel summary">
