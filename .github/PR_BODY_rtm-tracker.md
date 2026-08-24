@@ -2,8 +2,9 @@
 
 Extends the Zendesk ticket-print app into an internal **RTM (rifle return/RMA) tracker**, per JP's directive to formalize RTM capture and monthly trend review. The existing ticket-print feature is unchanged.
 
-- **Serial-first intake**: scan/type a serial → rifle info (model, caliber, barrel length, build/ship date, original customer) auto-filled from Infor VISUAL (read-only), prior-RTM history and repeat-return flag from Postgres, optional Zendesk ticket link with AI-drafted reason-for-return. Manual-entry fallback when VISUAL is unreachable.
-- **Workflow**: Received → In Inspection → In Repair → QC/Test → Shipped → Closed state machine (with no-fault skip and rework loop), full status history.
+- **Ticket-first intake** (CS receiving flow): enter a Zendesk ticket ID/URL → subject and requester shown, ticket linked, and the serial auto-filled from the ticket's serial custom field when present. Scanning/typing a serial then auto-fills rifle info (model, caliber, barrel length, build/ship date, original customer) from Infor VISUAL (read-only), plus prior-RTM history and repeat-return flag from Postgres. Manual-entry fallback when VISUAL is unreachable.
+- **Workflow**: Received → In Inspection → In Repair → QC/Test → Ready → Shipped → Closed state machine (with no-fault skip and rework loop), full status history.
+- **Status board** (`/rtm/board`): wall-display tracker with Received / In Process / Waiting / Ready / Shipped columns, auto-refreshing every 60s. Any RTM can be flagged "waiting on…" (parts, customer) from its detail page, which moves it to the Waiting column with the reason on the card.
 - **Labor & parts**: per-tech clock in/out sessions (touch time vs. calendar time), part lines validated against VISUAL with unit cost snapshotted at entry. Repair cost = parts + hours × configurable loaded rate (`rtm.config`).
 - **Judgment fields**: root cause / responsibility / resolution as controlled-vocabulary button groups (seeded per JP's categories), plus round count and ammo.
 - **Monthly reports** (`/rtm/reports` + CSV): RTM count and **rate** by model/caliber (denominator = VISUAL shipped units), root-cause Pareto, responsibility/resolution splits, avg/total repair cost, avg touch hours and calendar days, repeat-return list.
