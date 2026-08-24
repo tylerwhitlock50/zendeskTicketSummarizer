@@ -1,5 +1,6 @@
 """Flask app: look up a Zendesk ticket and render a printable one-page summary sheet."""
 
+import logging
 import os
 import re
 from datetime import datetime, timezone
@@ -15,7 +16,25 @@ load_dotenv()
 REQUIRED_ENV_VARS = ["ZENDESK_SUBDOMAIN", "ZENDESK_EMAIL", "ZENDESK_API_TOKEN", "OPENAI_API_KEY"]
 
 app = Flask(__name__)
+app.secret_key = os.environ.get("FLASK_SECRET_KEY", "dev-secret-change-me")  # flash() needs it
 _client = None
+
+# RTM tracker (blueprints + Postgres pool). The ticket-print routes above must
+# keep working even if the RTM database is not configured.
+import rtm_db
+from rtm_views import rtm_bp
+from rtm_reports import reports_bp
+
+app.register_blueprint(rtm_bp)
+app.register_blueprint(reports_bp)
+
+_rtm_dsn = os.environ.get("RTM_DATABASE_URL", "")
+if _rtm_dsn:
+    rtm_db.init_pool(_rtm_dsn)
+else:
+    logging.getLogger(__name__).warning(
+        "RTM_DATABASE_URL is not set; RTM tracker routes will be unavailable."
+    )
 
 
 def missing_config():
