@@ -1,0 +1,70 @@
+{% extends "rtm/base.html" %}
+
+{% block rtm_content %}
+<h1>Findings — {{ rtm.get('rtm_number') }} <span class="muted">SN {{ rtm.get('serial_no') }}</span></h1>
+
+<form method="post" action="{{ url_for('rtm.findings', rtm_id=rtm.get('id')) }}">
+  <div class="card">
+    <label>Inspection notes
+      <textarea name="inspection_notes" rows="4">{{ rtm.get('inspection_notes') or '' }}</textarea>
+    </label>
+    <label>Findings
+      <textarea name="findings" rows="4">{{ rtm.get('findings') or '' }}</textarea>
+    </label>
+  </div>
+
+  <div class="card">
+    <h2>Root cause</h2>
+    <div class="choice-group">
+      {% for opt in lookups.root_cause %}
+      <label>
+        <input type="radio" name="root_cause_id" value="{{ opt.id }}" hidden
+               {% if rtm.get('root_cause_id') == opt.id %}checked{% endif %}>
+        <span class="btn-big">{{ opt.label }}</span>
+      </label>
+      {% endfor %}
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Responsibility</h2>
+    <div class="choice-group">
+      {% for opt in lookups.responsibility %}
+      <label>
+        <input type="radio" name="responsibility_id" value="{{ opt.id }}" hidden
+               {% if rtm.get('responsibility_id') == opt.id %}checked{% endif %}>
+        <span class="btn-big">{{ opt.label }}</span>
+      </label>
+      {% endfor %}
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Resolution</h2>
+    <div class="choice-group">
+      {% for opt in lookups.resolution %}
+      <label>
+        <input type="radio" name="resolution_id" value="{{ opt.id }}" hidden
+               {% if rtm.get('resolution_id') == opt.id %}checked{% endif %}>
+        <span class="btn-big">{{ opt.label }}</span>
+      </label>
+      {% endfor %}
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="grid2">
+      <label>Round count
+        <input type="number" name="round_count" min="0" step="1" inputmode="numeric"
+               value="{{ rtm.get('round_count') if rtm.get('round_count') is not none else '' }}">
+      </label>
+      <label>Ammo used
+        <input type="text" name="ammo_used" autocomplete="off" value="{{ rtm.get('ammo_used') or '' }}">
+      </label>
+    </div>
+  </div>
+
+  <button type="submit" class="btn-big">Save findings</button>
+  <a class="btn-big" href="{{ url_for('rtm.detail', rtm_id=rtm.get('id')) }}">Back</a>
+</form>
+{% endblock %}

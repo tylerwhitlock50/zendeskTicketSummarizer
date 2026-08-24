@@ -1,0 +1,94 @@
+{% extends "rtm/base.html" %}
+
+{% block rtm_content %}
+<h1>Close {{ rtm.get('rtm_number') }}</h1>
+<p>
+  <span class="status-badge status-{{ rtm.get('status') }}">{{ status_labels.get(rtm.get('status'), rtm.get('status')) }}</span>
+  {% if rtm.get('repeat_return') %}<span class="status-badge danger">Repeat return</span>{% endif %}
+</p>
+
+<div class="card">
+  <h2>Rifle</h2>
+  <dl class="grid2">
+    <div><dt>Serial</dt><dd>{{ rtm.get('serial_no') }}</dd></div>
+    <div><dt>Model</dt><dd>{{ rtm.get('model') or '—' }}</dd></div>
+    <div><dt>Caliber</dt><dd>{{ rtm.get('caliber') or '—' }}</dd></div>
+    <div><dt>Barrel length</dt><dd>{{ rtm.get('barrel_length') or '—' }}</dd></div>
+  </dl>
+</div>
+
+<div class="card">
+  <h2>Judgment</h2>
+  <dl class="grid2">
+    <div><dt>Root cause</dt><dd>{{ rtm.get('root_cause_label') or '—' }}</dd></div>
+    <div><dt>Responsibility</dt><dd>{{ rtm.get('responsibility_label') or '—' }}</dd></div>
+    <div><dt>Resolution</dt><dd>{{ rtm.get('resolution_label') or '—' }}</dd></div>
+    <div><dt>Round count</dt><dd>{{ rtm.get('round_count') if rtm.get('round_count') is not none else '—' }}</dd></div>
+    <div><dt>Ammo used</dt><dd>{{ rtm.get('ammo_used') or '—' }}</dd></div>
+  </dl>
+  {% if rtm.get('reason_for_return') %}
+  <h3>Reason for return</h3><p>{{ rtm.get('reason_for_return') }}</p>
+  {% endif %}
+  {% if rtm.get('inspection_notes') %}
+  <h3>Inspection notes</h3><p>{{ rtm.get('inspection_notes') }}</p>
+  {% endif %}
+  {% if rtm.get('findings') %}
+  <h3>Findings</h3><p>{{ rtm.get('findings') }}</p>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h2>Parts used</h2>
+  {% if rtm.get('part_lines') %}
+  <table class="parts-table">
+    <thead><tr><th>Part</th><th>Description</th><th>Qty</th><th>Unit cost</th></tr></thead>
+    <tbody>
+      {% for line in rtm.get('part_lines') %}
+      <tr>
+        <td>{{ line.get('part_id') }}</td>
+        <td>{{ line.get('description') }}</td>
+        <td>{{ line.get('qty') }}</td>
+        <td>${{ line.get('unit_cost') }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted">No parts recorded.</p>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h2>Cost &amp; turnaround</h2>
+  <dl class="grid2">
+    <div><dt>Parts cost</dt><dd>${{ rtm.get('parts_cost') }}</dd></div>
+    <div><dt>Labor</dt><dd>${{ rtm.get('labor_cost') }} ({{ rtm.get('labor_hours') }} h)</dd></div>
+    <div><dt>Total cost</dt><dd><strong>${{ rtm.get('total_cost') }}</strong></dd></div>
+    <div><dt>Calendar days</dt><dd>{{ rtm.get('calendar_days') if rtm.get('calendar_days') is not none else '—' }}</dd></div>
+    <div><dt>Received</dt><dd>{{ (rtm.get('received_at') or rtm.get('created_at'))|localdt }}</dd></div>
+    <div><dt>Shipped</dt><dd>{{ rtm.get('shipped_at')|localdt }}</dd></div>
+  </dl>
+</div>
+
+{% if missing %}
+<div class="notice warn">
+  <strong>Cannot close yet:</strong> set {{ missing|join(', ')|lower }} on the
+  <a href="{{ url_for('rtm.findings', rtm_id=rtm.get('id')) }}">findings page</a> first.
+</div>
+<a class="btn-big" href="{{ url_for('rtm.findings', rtm_id=rtm.get('id')) }}">Go to findings</a>
+{% else %}
+<form method="post" action="{{ url_for('rtm.close', rtm_id=rtm.get('id')) }}">
+  <div class="card">
+    <h2>Closed by</h2>
+    <div class="choice-group">
+      {% for tech in lookups.techs %}
+      <label><input type="radio" name="tech_id" value="{{ tech.id }}" hidden><span class="btn-big">{{ tech.name }}</span></label>
+      {% endfor %}
+    </div>
+  </div>
+  <button type="submit" class="btn-big danger">Close RTM</button>
+</form>
+{% endif %}
+
+<a class="btn-big" href="{{ url_for('rtm.detail', rtm_id=rtm.get('id')) }}">Back to RTM</a>
+{% endblock %}

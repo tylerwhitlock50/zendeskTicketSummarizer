@@ -1,0 +1,40 @@
+{% extends "rtm/base.html" %}
+
+{% block rtm_content %}
+<div class="worklist-head">
+  <h1>Open RTMs <span class="muted">({{ total }})</span></h1>
+  <a class="btn-big" href="{{ url_for('rtm.intake') }}">+ New RTM</a>
+</div>
+
+{% if not groups %}
+<div class="card">
+  <p>No open RTMs. Scan a rifle in with <a href="{{ url_for('rtm.intake') }}">New RTM</a>.</p>
+</div>
+{% endif %}
+
+{% for status, label, rows in groups %}
+<section class="worklist-group">
+  <h2><span class="status-badge status-{{ status }}">{{ label }}</span> <span class="muted">{{ rows|length }}</span></h2>
+  {% for r in rows %}
+  <a class="card rtm-card" href="{{ url_for('rtm.detail', rtm_id=r.get('id')) }}">
+    <div class="grid2">
+      <div>
+        <strong>{{ r.get('rtm_number') }}</strong>
+        <div>SN {{ r.get('serial_no') }}</div>
+        <div class="muted">{{ r.get('model') or '—' }} {{ r.get('caliber') or '' }}</div>
+      </div>
+      <div>
+        {% if r.get('days_open') is not none %}
+        <div>{{ r.get('days_open') }} day{{ 's' if r.get('days_open') != 1 }} open</div>
+        {% endif %}
+        {% if r.get('repeat_return') %}<span class="status-badge danger">Repeat return</span>{% endif %}
+        {% if r.get('open_session') or r.get('has_open_session') %}
+        <span class="status-badge">Tech clocked in</span>
+        {% endif %}
+      </div>
+    </div>
+  </a>
+  {% endfor %}
+</section>
+{% endfor %}
+{% endblock %}

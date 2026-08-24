@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}RTM Tracker{% endblock %}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='rtm.css') }}">
+  {% block extra_head %}{% endblock %}
+</head>
+<body class="rtm-page">
+  <header class="rtm-header no-print">
+    <a class="rtm-title" href="/rtm/">RTM Tracker</a>
+    <nav class="rtm-nav">
+      <a class="btn-big secondary" href="/rtm/">Worklist</a>
+      <a class="btn-big secondary" href="/rtm/intake">New RTM</a>
+      <a class="btn-big secondary" href="/rtm/reports">Reports</a>
+    </nav>
+  </header>
+
+  <div class="flash-area no-print">
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% for category, message in messages %}
+      <div class="flash flash-{{ category or 'info' }}">
+        <span>{{ message }}</span>
+        <button type="button" class="flash-dismiss" onclick="this.parentElement.remove()" aria-label="Dismiss">&times;</button>
+      </div>
+      {% endfor %}
+    {% endwith %}
+  </div>
+
+  <main class="rtm-main">
+    {% block rtm_content %}{% endblock %}
+  </main>
+
+  <script src="{{ url_for('static', filename='rtm.js') }}" defer></script>
+  {% block scripts %}{% endblock %}
+</body>
+</html>

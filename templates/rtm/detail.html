@@ -1,0 +1,174 @@
+{% extends "rtm/base.html" %}
+
+{% block rtm_content %}
+<div class="detail-head">
+  <h1>{{ rtm.get('rtm_number') }}</h1>
+  <span class="status-badge status-{{ rtm.get('status') }}">{{ status_labels.get(rtm.get('status'), rtm.get('status')) }}</span>
+  {% if rtm.get('repeat_return') %}<span class="status-badge danger">Repeat return</span>{% endif %}
+</div>
+
+<!-- Rifle snapshot -->
+<div class="card">
+  <h2>Rifle</h2>
+  <dl class="grid2">
+    <div><dt>Serial</dt><dd>{{ rtm.get('serial_no') }}</dd></div>
+    <div><dt>Model</dt><dd>{{ rtm.get('model') or '—' }}</dd></div>
+    <div><dt>Caliber</dt><dd>{{ rtm.get('caliber') or '—' }}</dd></div>
+    <div><dt>Barrel length</dt><dd>{{ rtm.get('barrel_length') or '—' }}</dd></div>
+    <div><dt>Part ID</dt><dd>{{ rtm.get('part_id') or '—' }}</dd></div>
+    <div><dt>Build date</dt><dd>{{ rtm.get('build_date')|localdate }}</dd></div>
+    <div><dt>Original ship</dt><dd>{{ rtm.get('ship_date')|localdate }}</dd></div>
+    <div><dt>Original customer</dt><dd>{{ rtm.get('original_customer_id') or '—' }}</dd></div>
+    <div><dt>Received</dt><dd>{{ (rtm.get('received_at') or rtm.get('created_at'))|localdt }}</dd></div>
+    <div><dt>Days in house</dt><dd>{{ rtm.get('calendar_days') if rtm.get('calendar_days') is not none else '—' }}</dd></div>
+  </dl>
+</div>
+
+<!-- Status transitions -->
+{% if allowed %}
+<div class="card">
+  <h2>Move to next step</h2>
+  <form method="post" action="{{ url_for('rtm.status', rtm_id=rtm.get('id')) }}">
+    <div class="choice-group">
+      {% for tech in lookups.techs %}
+      <label><input type="radio" name="tech_id" value="{{ tech.id }}" hidden><span class="btn-big">{{ tech.name }}</span></label>
+      {% endfor %}
+    </div>
+    {% for next_status in allowed %}
+    <button type="submit" class="btn-big" name="to_status" value="{{ next_status }}">
+      &rarr; {{ status_labels.get(next_status, next_status) }}
+    </button>
+    {% endfor %}
+  </form>
+  {% if rtm.get('status') in ('qc_test', 'shipped') %}
+  <a class="btn-big" href="{{ url_for('rtm.close', rtm_id=rtm.get('id')) }}">Review &amp; close</a>
+  {% endif %}
+</div>
+{% endif %}
+
+<!-- Labor clock -->
+<div class="card">
+  <h2>Labor clock</h2>
+  {% if open_sessions %}
+  <ul>
+    {% for s in open_sessions %}
+    <li><strong>{{ s.get('tech_name') or ('Tech ' ~ s.get('tech_id')) }}</strong> clocked in {{ s.get('started_at')|localdt }}</li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <p class="muted">No one is clocked in on this RTM.</p>
+  {% endif %}
+  <form method="post" action="{{ url_for('rtm.clock_in', rtm_id=rtm.get('id')) }}">
+    <div class="choice-group">
+      {% for tech in lookups.techs %}
+      <label><input type="radio" name="tech_id" value="{{ tech.id }}" hidden><span class="btn-big">{{ tech.name }}</span></label>
+      {% endfor %}
+    </div>
+    <button type="submit" class="btn-big">Clock in</button>
+    <button type="submit" class="btn-big" formaction="{{ url_for('rtm.clock_out', rtm_id=rtm.get('id')) }}">Clock out</button>
+  </form>
+</div>
+
+<!-- Parts -->
+<div class="card">
+  <h2>Parts used</h2>
+  {% if rtm.get('part_lines') %}
+  <table class="parts-table">
+    <thead><tr><th>Part</th><th>Description</th><th>Qty</th><th>Unit cost</th><th></th></tr></thead>
+    <tbody>
+      {% for line in rtm.get('part_lines') %}
+      <tr>
+        <td>{{ line.get('part_id') }}</td>
+        <td>{{ line.get('description') }}</td>
+        <td>{{ line.get('qty') }}</td>
+        <td>${{ line.get('unit_cost') }}</td>
+        <td>
+          <form method="post" action="{{ url_for('rtm.delete_part', rtm_id=rtm.get('id'), line_id=line.get('id')) }}">
+            <button type="submit" class="btn-big danger">Delete</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted">No parts recorded.</p>
+  {% endif %}
+
+  <form method="post" action="{{ url_for('rtm.add_part', rtm_id=rtm.get('id')) }}" data-part-form>
+    <div class="grid2">
+      <label>Part ID
+        <input type="text" name="part_id" autocomplete="off" autocapitalize="characters" spellcheck="false" data-part-input>
+      </label>
+      <label>Qty <input type="number" name="qty" value="1" min="0.01" step="any" inputmode="decimal"></label>
+    </div>
+    <div class="notice" data-part-preview hidden></div>
+    <div class="choice-group">
+      {% for tech in lookups.techs %}
+      <label><input type="radio" name="tech_id" value="{{ tech.id }}" hidden><span class="btn-big">{{ tech.name }}</span></label>
+      {% endfor %}
+    </div>
+    <button type="submit" class="btn-big">Add part</button>
+  </form>
+</div>
+
+<!-- Findings summary -->
+<div class="card">
+  <h2>Findings</h2>
+  <dl class="grid2">
+    <div><dt>Root cause</dt><dd>{{ rtm.get('root_cause_label') or '—' }}</dd></div>
+    <div><dt>Responsibility</dt><dd>{{ rtm.get('responsibility_label') or '—' }}</dd></div>
+    <div><dt>Resolution</dt><dd>{{ rtm.get('resolution_label') or '—' }}</dd></div>
+    <div><dt>Round count</dt><dd>{{ rtm.get('round_count') if rtm.get('round_count') is not none else '—' }}</dd></div>
+    <div><dt>Ammo used</dt><dd>{{ rtm.get('ammo_used') or '—' }}</dd></div>
+  </dl>
+  {% if rtm.get('findings') %}<p>{{ rtm.get('findings') }}</p>{% endif %}
+  <a class="btn-big" href="{{ url_for('rtm.findings', rtm_id=rtm.get('id')) }}">Edit findings</a>
+</div>
+
+<!-- Zendesk -->
+<div class="card">
+  <h2>Zendesk</h2>
+  {% if rtm.get('zendesk_ticket_id') %}
+  <p>Linked ticket: <strong>#{{ rtm.get('zendesk_ticket_id') }}</strong>
+    — <a href="{{ url_for('ticket_sheet', ticket_id=rtm.get('zendesk_ticket_id')) }}">print sheet</a></p>
+  <form method="post" action="{{ url_for('rtm.draft_reason', rtm_id=rtm.get('id')) }}">
+    <button type="submit" class="btn-big">Draft reason for return from ticket</button>
+  </form>
+  {% endif %}
+  <form method="post" action="{{ url_for('rtm.link_ticket', rtm_id=rtm.get('id')) }}">
+    <label>{{ 'Change linked ticket' if rtm.get('zendesk_ticket_id') else 'Link a ticket' }}
+      <input type="text" name="ticket_id" placeholder="Ticket ID or ticket URL" autocomplete="off">
+    </label>
+    <button type="submit" class="btn-big">Link ticket</button>
+  </form>
+  <h3>Reason for return</h3>
+  <p>{{ rtm.get('reason_for_return') or '—' }}</p>
+</div>
+
+<!-- Costs -->
+<div class="card">
+  <h2>Cost</h2>
+  <dl class="grid2">
+    <div><dt>Parts</dt><dd>${{ rtm.get('parts_cost') }}</dd></div>
+    <div><dt>Labor</dt><dd>${{ rtm.get('labor_cost') }} ({{ rtm.get('labor_hours') }} h)</dd></div>
+    <div><dt>Total</dt><dd><strong>${{ rtm.get('total_cost') }}</strong></dd></div>
+  </dl>
+</div>
+
+<!-- History -->
+{% if rtm.get('status_events') %}
+<div class="card">
+  <h2>Status history</h2>
+  <ul>
+    {% for ev in rtm.get('status_events') %}
+    <li>
+      {{ ev.get('changed_at')|localdt }} —
+      {{ status_labels.get(ev.get('status'), ev.get('status')) }}
+      {% if ev.get('tech_name') %}<span class="muted">by {{ ev.get('tech_name') }}</span>{% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+</div>
+{% endif %}
+{% endblock %}

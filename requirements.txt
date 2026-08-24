@@ -2,3 +2,6 @@ flask>=3.0
 requests>=2.31
 python-dotenv>=1.0
 openai>=1.40
+pymssql>=2.3
+psycopg[binary]>=3.2
+psycopg_pool>=3.2

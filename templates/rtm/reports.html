@@ -1,0 +1,182 @@
+{% extends "rtm/base.html" %}
+
+{% block rtm_content %}
+<style>
+  .month-picker { display: flex; align-items: center; gap: 0.75rem; margin-bottom: 1rem; flex-wrap: wrap; }
+  .month-picker h2 { margin: 0; }
+  .month-picker input[type="month"] { min-height: 44px; font-size: 1rem; padding: 0.25rem 0.5rem; }
+  .table-wrap { overflow-x: auto; }
+  .report-table { width: 100%; border-collapse: collapse; font-size: 0.95rem; }
+  .report-table th, .report-table td { padding: 0.5rem 0.75rem; text-align: left; border-bottom: 1px solid #ddd; }
+  .report-table th { border-bottom: 2px solid #999; }
+  .report-table td.num, .report-table th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .stat-value { font-size: 1.6rem; font-weight: 700; margin: 0.15rem 0 0; }
+  .stat-label { margin: 0; font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.04em; opacity: 0.7; }
+  .card-head { display: flex; justify-content: space-between; align-items: baseline; gap: 1rem; flex-wrap: wrap; }
+  .card-head h3 { margin: 0; }
+  .unavailable { opacity: 0.6; font-style: italic; }
+  @media print {
+    nav, .month-picker form, .month-picker a, .csv-btn { display: none !important; }
+  }
+</style>
+
+<div class="month-picker">
+  <a class="btn-big" href="{{ url_for('rtm_reports.reports', month=prev_month) }}">&larr; Prev</a>
+  <h2>{{ month_label }}</h2>
+  <a class="btn-big" href="{{ url_for('rtm_reports.reports', month=next_month) }}">Next &rarr;</a>
+  <form method="get" action="{{ url_for('rtm_reports.reports') }}">
+    <input type="month" name="month" value="{{ month_value }}" onchange="this.form.submit()">
+    <noscript><button type="submit" class="btn-big">Go</button></noscript>
+  </form>
+</div>
+
+<div class="grid2">
+  <div class="card">
+    <p class="stat-label">RTMs received</p>
+    <p class="stat-value">{{ report.get('received_count', 0) }}</p>
+  </div>
+  <div class="card">
+    <p class="stat-label">RTMs closed</p>
+    <p class="stat-value">{{ report.get('closed_count', 0) }}</p>
+  </div>
+  <div class="card">
+    <p class="stat-label">Total repair spend</p>
+    <p class="stat-value">${{ '%.2f'|format(report.get('total_cost') or 0) }}</p>
+  </div>
+  <div class="card">
+    <p class="stat-label">Avg repair cost</p>
+    <p class="stat-value">${{ '%.2f'|format(report.get('avg_total_cost') or 0) }}</p>
+  </div>
+  <div class="card">
+    <p class="stat-label">Avg touch hours</p>
+    <p class="stat-value">{{ '%.1f'|format(report.get('avg_touch_hours') or 0) }}</p>
+  </div>
+  <div class="card">
+    <p class="stat-label">Avg calendar days</p>
+    <p class="stat-value">{{ '%.1f'|format(report.get('avg_calendar_days') or 0) }}</p>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-head">
+    <h3>RTM rate by model / caliber</h3>
+    <a class="btn-big csv-btn" href="{{ url_for('rtm_reports.reports_csv', month=month_value, report='rate') }}">Download CSV</a>
+  </div>
+  {% if rates_unavailable %}
+    <p class="unavailable">Shipped units and rates unavailable — VISUAL could not be reached.</p>
+  {% endif %}
+  <div class="table-wrap">
+    <table class="report-table">
+      <thead>
+        <tr>
+          <th>Model</th><th>Caliber</th>
+          <th class="num">RTMs</th><th class="num">Units shipped</th><th class="num">Rate %</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in rate_rows %}
+        <tr>
+          <td>{{ row.model or '—' }}</td>
+          <td>{{ row.caliber or '—' }}</td>
+          <td class="num">{{ row.rtms }}</td>
+          <td class="num">{% if rates_unavailable %}<span class="unavailable">n/a</span>{% else %}{{ row.units_shipped }}{% endif %}</td>
+          <td class="num">
+            {% if rates_unavailable %}<span class="unavailable">n/a</span>
+            {% elif row.rate_pct is none %}—
+            {% else %}{{ '%.2f'|format(row.rate_pct) }}{% endif %}
+          </td>
+        </tr>
+        {% else %}
+        <tr><td colspan="5">No data for this month.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-head">
+    <h3>Root-cause Pareto</h3>
+    <a class="btn-big csv-btn" href="{{ url_for('rtm_reports.reports_csv', month=month_value, report='pareto') }}">Download CSV</a>
+  </div>
+  <div class="table-wrap">
+    <table class="report-table">
+      <thead><tr><th>Root cause</th><th class="num">Count</th><th class="num">Cumulative %</th></tr></thead>
+      <tbody>
+        {% for row in report.get('root_cause_pareto') or [] %}
+        <tr>
+          <td>{{ row.get('label') or '—' }}</td>
+          <td class="num">{{ row.get('count', row.get('rtms', 0)) }}</td>
+          <td class="num">{{ '%.1f'|format(row.get('cumulative_pct', row.get('cum_pct', 0)) or 0) }}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="3">No closed RTMs with a root cause this month.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div class="grid2">
+  <div class="card">
+    <h3>Responsibility split</h3>
+    <div class="table-wrap">
+      <table class="report-table">
+        <thead><tr><th>Responsibility</th><th class="num">Count</th></tr></thead>
+        <tbody>
+          {% for row in report.get('responsibility_split') or [] %}
+          <tr><td>{{ row.get('label') or '—' }}</td><td class="num">{{ row.get('count', row.get('rtms', 0)) }}</td></tr>
+          {% else %}
+          <tr><td colspan="2">No data.</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+  <div class="card">
+    <h3>Resolution split</h3>
+    <div class="table-wrap">
+      <table class="report-table">
+        <thead><tr><th>Resolution</th><th class="num">Count</th></tr></thead>
+        <tbody>
+          {% for row in report.get('resolution_split') or [] %}
+          <tr><td>{{ row.get('label') or '—' }}</td><td class="num">{{ row.get('count', row.get('rtms', 0)) }}</td></tr>
+          {% else %}
+          <tr><td colspan="2">No data.</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-head">
+    <h3>Repeat returns</h3>
+    <a class="btn-big csv-btn" href="{{ url_for('rtm_reports.reports_csv', month=month_value, report='detail') }}">Download CSV</a>
+  </div>
+  <div class="table-wrap">
+    <table class="report-table">
+      <thead><tr><th>RTM #</th><th>Serial</th><th>Model</th><th>Caliber</th></tr></thead>
+      <tbody>
+        {% for row in report.get('repeat_returns') or [] %}
+        <tr>
+          <td>
+            {% if row.get('id') or row.get('rtm_id') %}
+              <a href="{{ url_for('rtm.detail', rtm_id=row.get('id') or row.get('rtm_id')) }}">{{ row.get('rtm_number') }}</a>
+            {% else %}
+              {{ row.get('rtm_number') }}
+            {% endif %}
+          </td>
+          <td>{{ row.get('serial_no') or '—' }}</td>
+          <td>{{ row.get('model') or '—' }}</td>
+          <td>{{ row.get('caliber') or '—' }}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="4">No repeat returns this month.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}

@@ -5,11 +5,14 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt gunicorn
 
-COPY app.py zendesk_client.py summarizer.py ./
+COPY app.py zendesk_client.py summarizer.py visual_client.py rtm_db.py rtm_views.py rtm_reports.py ./
 COPY templates/ templates/
 COPY static/ static/
+COPY migrations/ migrations/
+COPY entrypoint.sh .
+RUN chmod +x entrypoint.sh
 
 EXPOSE 5000
 
-# IO-bound workload (Zendesk + OpenAI calls); generous timeout for long tickets
-CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--workers", "2", "--threads", "4", "--timeout", "120", "app:app"]
+# IO-bound workload (Zendesk + OpenAI + DB calls); generous timeout for long tickets
+ENTRYPOINT ["./entrypoint.sh"]

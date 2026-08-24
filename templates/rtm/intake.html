@@ -1,0 +1,74 @@
+{% extends "rtm/base.html" %}
+
+{% block rtm_content %}
+<h1>New RTM</h1>
+
+<form method="post" action="{{ url_for('rtm.intake') }}" data-rtm-intake>
+  <div class="card">
+    <label for="serial_no"><strong>Serial number</strong> — scan or type, then Enter</label>
+    <input
+      id="serial_no"
+      class="serial-input"
+      type="text"
+      name="serial_no"
+      autofocus
+      required
+      autocomplete="off"
+      autocapitalize="characters"
+      spellcheck="false"
+      inputmode="text"
+      data-serial-input
+    >
+  </div>
+
+  <!-- Filled by rtm.js wireIntake() after fetchSerial(); hidden until a lookup runs. -->
+  <div class="card" data-serial-preview hidden>
+    <h2>Rifle</h2>
+    <div class="notice warn" data-serial-not-found hidden>
+      Serial not found in VISUAL — fill in the rifle info below.
+    </div>
+    <div class="notice danger" data-repeat-warning hidden>
+      <strong>Repeat return</strong> — this serial has prior RTMs.
+    </div>
+    <dl class="grid2">
+      <div><dt>Model</dt><dd data-fill="model">—</dd></div>
+      <div><dt>Caliber</dt><dd data-fill="caliber">—</dd></div>
+      <div><dt>Barrel length</dt><dd data-fill="barrel_length">—</dd></div>
+      <div><dt>Part ID</dt><dd data-fill="part_id">—</dd></div>
+      <div><dt>Build date</dt><dd data-fill="build_date">—</dd></div>
+      <div><dt>Ship date</dt><dd data-fill="ship_date">—</dd></div>
+      <div><dt>Original customer</dt><dd data-fill="original_customer_id">—</dd></div>
+    </dl>
+    <ul data-prior-rtms></ul>
+  </div>
+
+  <!-- Manual fallback: shown by rtm.js when the serial is not found, or use directly if VISUAL is down. -->
+  <div class="card" data-manual-entry>
+    <h2>Manual rifle info <span class="muted">(only if VISUAL lookup fails)</span></h2>
+    <div class="grid2">
+      <label>Model <input type="text" name="model" autocomplete="off"></label>
+      <label>Caliber <input type="text" name="caliber" autocomplete="off"></label>
+      <label>Barrel length <input type="text" name="barrel_length" autocomplete="off"></label>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Received by</h2>
+    <div class="choice-group">
+      {% for tech in lookups.techs %}
+      <label><input type="radio" name="tech_id" value="{{ tech.id }}" hidden><span class="btn-big">{{ tech.name }}</span></label>
+      {% endfor %}
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Zendesk ticket <span class="muted">(optional)</span></h2>
+    <input type="text" name="zendesk_ticket" placeholder="Ticket ID or ticket URL" autocomplete="off">
+    <label>Reason for return <span class="muted">(optional — can be AI-drafted later)</span>
+      <textarea name="reason_for_return" rows="3"></textarea>
+    </label>
+  </div>
+
+  <button type="submit" class="btn-big">Create RTM</button>
+</form>
+{% endblock %}
