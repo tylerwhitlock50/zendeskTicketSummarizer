@@ -40,8 +40,30 @@
     </button>
     {% endfor %}
   </form>
-  {% if rtm.get('status') in ('qc_test', 'shipped') %}
+  {% if rtm.get('status') in ('qc_test', 'ready', 'shipped') %}
   <a class="btn-big" href="{{ url_for('rtm.close', rtm_id=rtm.get('id')) }}">Review &amp; close</a>
+  {% endif %}
+</div>
+{% endif %}
+
+<!-- Waiting / hold flag (drives the Waiting column on the board) -->
+{% if rtm.get('status') not in ('shipped', 'closed') %}
+<div class="card">
+  <h2>Waiting</h2>
+  {% if rtm.get('on_hold') %}
+  <div class="notice warn">
+    <strong>Waiting</strong>{% if rtm.get('hold_reason') %} — {{ rtm.get('hold_reason') }}{% endif %}
+  </div>
+  <form method="post" action="{{ url_for('rtm.hold', rtm_id=rtm.get('id')) }}">
+    <input type="hidden" name="on_hold" value="0">
+    <button type="submit" class="btn-big secondary">Resume — no longer waiting</button>
+  </form>
+  {% else %}
+  <form method="post" action="{{ url_for('rtm.hold', rtm_id=rtm.get('id')) }}">
+    <input type="hidden" name="on_hold" value="1">
+    <input type="text" name="hold_reason" placeholder="Waiting on... (parts, customer, etc.)" autocomplete="off">
+    <button type="submit" class="btn-big secondary">Mark waiting</button>
+  </form>
   {% endif %}
 </div>
 {% endif %}

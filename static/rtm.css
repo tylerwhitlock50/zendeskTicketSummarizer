@@ -324,3 +324,83 @@ body.rtm-page {
   }
   .card { box-shadow: none; border: 1px solid #999; }
 }
+
+/* ---------- Notices & muted text (used by intake previews) ---------- */
+
+.muted { color: var(--rtm-muted); font-weight: 400; }
+
+.notice {
+  margin-top: 10px;
+  padding: 10px 14px;
+  border-radius: 8px;
+  background: #eef3f8;
+  border: 1px solid #c7d6e5;
+}
+.notice.warn   { background: #fdf3e3; border-color: #e3c58a; }
+.notice.danger { background: #fbe9e7; border-color: #e0a49b; }
+
+/* ---------- Status badge for the new 'ready' state ---------- */
+
+.status-badge.status-ready { background: #b8860b; }
+
+/* ---------- Status board (wall display) ---------- */
+
+.board {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 12px;
+  align-items: start;
+}
+
+@media (max-width: 1000px) {
+  .board { grid-template-columns: repeat(2, 1fr); }
+}
+@media (max-width: 600px) {
+  .board { grid-template-columns: 1fr; }
+}
+
+.board-col {
+  background: #e9edf1;
+  border-radius: 12px;
+  padding: 10px;
+  min-height: 120px;
+}
+
+.board-col-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 8px;
+}
+.board-col-head h2 { margin: 0; font-size: 1.15rem; }
+
+.board-count {
+  background: var(--rtm-primary);
+  color: #fff;
+  border-radius: 999px;
+  padding: 2px 12px;
+  font-weight: 600;
+}
+.board-col-waiting .board-count { background: #b25b00; }
+.board-col-ready   .board-count { background: #b8860b; }
+.board-col-shipped .board-count { background: #1d7a3d; }
+
+.board-card {
+  display: block;
+  background: var(--rtm-card);
+  border-radius: 10px;
+  padding: 10px 12px;
+  margin-bottom: 8px;
+  text-decoration: none;
+  color: inherit;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.10);
+}
+
+.board-rtm    { display: block; font-weight: 700; }
+.board-serial { display: block; font-size: 0.95rem; color: var(--rtm-muted); }
+.board-model  { display: block; font-size: 0.9rem; }
+.board-meta   { display: block; font-size: 0.85rem; margin-top: 4px; color: var(--rtm-muted); }
+.board-days   { font-weight: 600; margin-left: 6px; }
+.board-hold-reason { color: #b25b00; font-weight: 600; }
+.board-active { color: #1d7a3d; }
+.board-empty  { text-align: center; margin: 20px 0; }

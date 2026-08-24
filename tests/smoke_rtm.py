@@ -323,3 +323,66 @@ def test_reports_page_when_visual_down(client, monkeypatch):
     resp = client.get("/rtm/reports")
     assert resp.status_code == 200
     assert b"unavailable" in resp.data.lower()
+
+
+def test_ready_status_and_board(client, techs):
+    rtm_id = _create_rtm(client, techs, serial="CVBOARD01")
+    tech = techs[0]["id"]
+    for to in ("in_inspection", "qc_test", "ready"):
+        resp = client.post(f"/rtm/{rtm_id}/status", data={"to_status": to, "tech_id": tech})
+        assert resp.status_code == 302
+
+    import rtm_db
+
+    assert rtm_db.get_rtm(rtm_id)["status"] == "ready"
+
+    resp = client.get("/rtm/board")
+    assert resp.status_code == 200
+    assert b"Ready" in resp.data and b"Waiting" in resp.data
+    assert b"CVBOARD01" in resp.data
+
+
+def test_hold_flag_moves_to_waiting_column(client, techs):
+    rtm_id = _create_rtm(client, techs, serial="CVHOLD01")
+    resp = client.post(
+        f"/rtm/{rtm_id}/hold", data={"on_hold": "1", "hold_reason": "Waiting on barrel"}
+    )
+    assert resp.status_code == 302
+
+    import rtm_db
+
+    rtm = rtm_db.get_rtm(rtm_id)
+    assert rtm["on_hold"] is True and rtm["hold_reason"] == "Waiting on barrel"
+
+    resp = client.get("/rtm/board")
+    assert b"Waiting on barrel" in resp.data
+
+    resp = client.post(f"/rtm/{rtm_id}/hold", data={"on_hold": "0"})
+    assert resp.status_code == 302
+    rtm = rtm_db.get_rtm(rtm_id)
+    assert rtm["on_hold"] is False and rtm["hold_reason"] is None
+
+
+def test_api_ticket_extracts_serial(client, monkeypatch):
+    import rtm_views
+
+    class FakeZendesk:
+        def get_ticket(self, ticket_id):
+            ticket = {"id": ticket_id, "subject": "Rifle won't group", "ticket_form_id": None,
+                      "custom_fields": [{"id": 10, "value": "cv126868"}]}
+            return ticket, {"name": "Jane Dealer"}, None
+
+        def get_ticket_fields(self):
+            return {10: {"id": 10, "title": "Serial Number", "custom_field_options": []}}
+
+        def get_ticket_form(self, form_id):
+            return None
+
+    monkeypatch.setattr(rtm_views, "_get_zendesk", lambda: FakeZendesk())
+    resp = client.get("/rtm/api/ticket/5555")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["found"] is True
+    assert data["subject"] == "Rifle won't group"
+    assert data["requester"] == "Jane Dealer"
+    assert data["serial"] == "CV126868"

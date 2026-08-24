@@ -5,6 +5,9 @@ window.RTM = {
   fetchSerial: function (s) {
     return fetch('/rtm/api/serial/' + encodeURIComponent(s)).then(function (r) { return r.json(); });
   },
+  fetchTicket: function (t) {
+    return fetch('/rtm/api/ticket/' + encodeURIComponent(t)).then(function (r) { return r.json(); });
+  },
   validatePart: function (p) {
     return fetch('/rtm/api/part/' + encodeURIComponent(p)).then(function (r) { return r.json(); });
   }
@@ -14,6 +17,53 @@ var INTAKE_FIELDS = ['part_id', 'model', 'caliber', 'barrel_length', 'build_date
 
 function setHidden(el, hidden) {
   if (el) el.hidden = !!hidden;
+}
+
+function wireTicketIntake() {
+  // Ticket-first intake: look up the Zendesk ticket, show subject/requester,
+  // and auto-fill the serial box when the ticket carries a serial custom field.
+  var form = document.querySelector('form[data-rtm-intake]');
+  if (!form) return;
+  var ticketInput = form.querySelector('input[data-ticket-input]');
+  if (!ticketInput) return;
+
+  var preview = form.querySelector('[data-ticket-preview]');
+  var errBox = form.querySelector('[data-ticket-error]');
+  var serialNote = form.querySelector('[data-ticket-serial-note]');
+  var serialInput = form.querySelector('input[data-serial-input], input[name="serial_no"]');
+
+  function lookup() {
+    var raw = ticketInput.value.trim();
+    var m = raw.match(/(\d+)\s*\/?\s*$/);
+    if (!m) { setHidden(preview, true); setHidden(errBox, true); return; }
+    window.RTM.fetchTicket(m[1]).then(function (data) {
+      if (!data.found) {
+        setHidden(preview, true);
+        if (errBox) { errBox.textContent = data.error || 'Ticket not found.'; setHidden(errBox, false); }
+        return;
+      }
+      setHidden(errBox, true);
+      var subj = form.querySelector('[data-ticket-fill="subject"]');
+      var req = form.querySelector('[data-ticket-fill="requester"]');
+      if (subj) subj.textContent = '#' + data.ticket_id + ' — ' + (data.subject || '(no subject)');
+      if (req) req.textContent = data.requester ? ' · ' + data.requester : '';
+      var gotSerial = !!(data.serial && serialInput && !serialInput.value.trim());
+      if (gotSerial) {
+        serialInput.value = data.serial;
+        serialInput.dispatchEvent(new Event('blur'));  // trigger the VISUAL lookup
+      }
+      setHidden(serialNote, !gotSerial);
+      setHidden(preview, false);
+      if (!gotSerial && serialInput) serialInput.focus();
+    }).catch(function () {
+      if (errBox) { errBox.textContent = 'Ticket lookup failed.'; setHidden(errBox, false); }
+    });
+  }
+
+  ticketInput.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter') { e.preventDefault(); lookup(); }
+  });
+  ticketInput.addEventListener('blur', lookup);
 }
 
 function wireIntake() {
@@ -149,6 +199,7 @@ function wirePartForm() {
 }
 
 document.addEventListener('DOMContentLoaded', function () {
+  wireTicketIntake();
   wireIntake();
   wirePartForm();
 });

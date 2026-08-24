@@ -1,0 +1,42 @@
+{% extends "rtm/base.html" %}
+
+{% block extra_head %}
+<meta http-equiv="refresh" content="60">
+{% endblock %}
+
+{% block rtm_content %}
+<div class="board">
+  {% for key, label, rows in board_columns %}
+  <section class="board-col board-col-{{ key }}">
+    <header class="board-col-head">
+      <h2>{{ label }}</h2>
+      <span class="board-count">{{ rows|length }}</span>
+    </header>
+    {% for row in rows %}
+    <a class="board-card" href="{{ url_for('rtm.detail', rtm_id=row.id) }}">
+      <span class="board-rtm">{{ row.rtm_number }}</span>
+      <span class="board-serial">{{ row.serial_no }}</span>
+      <span class="board-model">{{ row.model or '—' }}{% if row.caliber %} · {{ row.caliber }}{% endif %}</span>
+      <span class="board-meta">
+        {% if key == 'waiting' %}
+          <span class="board-hold-reason">{{ row.hold_reason or 'Waiting' }}</span>
+          <span class="muted">({{ status_labels.get(row.status, row.status) }})</span>
+        {% elif key == 'in_process' %}
+          {{ status_labels.get(row.status, row.status) }}
+        {% elif key == 'shipped' and row.shipped_at %}
+          {{ row.shipped_at|localdate }}
+        {% endif %}
+        {% if row.days_open is not none and key not in ('shipped',) %}
+          <span class="board-days{% if row.days_open > 14 %} danger{% endif %}">{{ row.days_open }}d</span>
+        {% endif %}
+        {% if row.repeat_return %}<span class="repeat-badge">R</span>{% endif %}
+        {% if row.open_sessions %}<span class="board-active">●</span>{% endif %}
+      </span>
+    </a>
+    {% else %}
+    <p class="board-empty muted">—</p>
+    {% endfor %}
+  </section>
+  {% endfor %}
+</div>
+{% endblock %}

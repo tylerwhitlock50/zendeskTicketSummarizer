@@ -24,7 +24,8 @@ ALLOWED_TRANSITIONS = {
     "received": ["in_inspection"],
     "in_inspection": ["in_repair", "qc_test"],
     "in_repair": ["qc_test"],
-    "qc_test": ["shipped", "in_repair"],
+    "qc_test": ["ready", "shipped", "in_repair"],
+    "ready": ["shipped", "in_repair"],
     "shipped": ["closed"],
     "closed": [],
 }
@@ -34,9 +35,21 @@ STATUS_LABELS = {
     "in_inspection": "In Inspection",
     "in_repair": "In Repair",
     "qc_test": "QC / Test",
+    "ready": "Ready",
     "shipped": "Shipped",
     "closed": "Closed",
 }
+
+# Status board ("Domino's tracker") columns: name -> statuses it collects.
+# Any pre-shipment RTM with on_hold=true lands in Waiting instead of its
+# status column.
+BOARD_COLUMNS = [
+    ("received", "Received", ["received"]),
+    ("in_process", "In Process", ["in_inspection", "in_repair", "qc_test"]),
+    ("waiting", "Waiting", []),
+    ("ready", "Ready", ["ready"]),
+    ("shipped", "Shipped", ["shipped"]),
+]
 
 TICKET_ID_RE = re.compile(r"(\d+)\s*/?\s*$")  # bare ID or Zendesk agent URL ending in the ID
 
@@ -129,6 +142,33 @@ def worklist():
     return render_template("rtm/worklist.html", groups=groups, total=len(rows))
 
 
+# ---------------------------------------------------------------- status board
+
+
+@rtm_bp.route("/board")
+def board():
+    """Wall-display status board: Received / In Process / Waiting / Ready / Shipped.
+
+    Auto-refreshes via meta tag; pre-shipment RTMs with on_hold=true show in
+    Waiting regardless of their underlying status.
+    """
+    rows = rtm_db.list_open_rtms()
+    columns = {key: [] for key, _, _ in BOARD_COLUMNS}
+    for row in rows:
+        row["days_open"] = _days_open(row)
+        if row.get("on_hold") and row.get("status") not in ("shipped", "closed"):
+            columns["waiting"].append(row)
+            continue
+        for key, _, statuses in BOARD_COLUMNS:
+            if row.get("status") in statuses:
+                columns[key].append(row)
+                break
+    board_columns = [(key, label, columns[key]) for key, label, _ in BOARD_COLUMNS]
+    return render_template(
+        "rtm/board.html", board_columns=board_columns, status_labels=STATUS_LABELS
+    )
+
+
 # ---------------------------------------------------------------- intake
 
 
@@ -174,6 +214,36 @@ def intake():
     )
     flash(f"RTM created for serial {serial}.", "success")
     return redirect(url_for("rtm.detail", rtm_id=rtm_id))
+
+
+@rtm_bp.route("/api/ticket/<int:ticket_id>")
+def api_ticket(ticket_id):
+    """Ticket-first intake: subject, requester, and any serial found in the
+    ticket's custom fields (field title containing 'serial')."""
+    try:
+        client = _get_zendesk()
+        ticket, requester, _org = client.get_ticket(ticket_id)
+        fields_map = client.get_ticket_fields()
+        form = client.get_ticket_form(ticket.get("ticket_form_id"))
+    except ZendeskError as exc:
+        return {"found": False, "error": str(exc)}, 502
+    except KeyError as exc:
+        return {"found": False, "error": f"Zendesk is not configured (missing {exc})."}, 502
+
+    serial = None
+    for field in resolve_custom_fields(ticket, fields_map, form):
+        if "serial" in (field.get("title") or "").lower():
+            serial = (field.get("value") or "").strip().upper() or None
+            break
+
+    return {
+        "found": True,
+        "ticket_id": ticket.get("id"),
+        "subject": ticket.get("subject"),
+        "requester": (requester or {}).get("name"),
+        "status": ticket.get("status"),
+        "serial": serial,
+    }
 
 
 @rtm_bp.route("/api/serial/<serial>")
@@ -251,6 +321,19 @@ def status(rtm_id):
         flash(f"Status changed to {STATUS_LABELS.get(to_status, to_status)}.", "success")
     except InvalidTransition as exc:
         flash(str(exc) or f"Cannot move to {to_status} from the current status.", "warning")
+    return redirect(url_for("rtm.detail", rtm_id=rtm_id))
+
+
+@rtm_bp.route("/<int:rtm_id>/hold", methods=["POST"])
+def hold(rtm_id):
+    """Toggle the Waiting flag (waiting on parts, customer response, etc.)."""
+    turning_on = (request.form.get("on_hold") or "") == "1"
+    reason = (request.form.get("hold_reason") or "").strip() or None
+    rtm_db.set_hold(rtm_id, turning_on, reason)
+    if turning_on:
+        flash(f"Marked waiting{f': {reason}' if reason else ''}.", "success")
+    else:
+        flash("Waiting flag cleared.", "success")
     return redirect(url_for("rtm.detail", rtm_id=rtm_id))
 
 

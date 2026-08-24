@@ -5,13 +5,32 @@
 
 <form method="post" action="{{ url_for('rtm.intake') }}" data-rtm-intake>
   <div class="card">
+    <label for="zendesk_ticket"><strong>Zendesk ticket</strong> — ID or URL, then Enter <span class="muted">(skip if starting from the rifle)</span></label>
+    <input
+      id="zendesk_ticket"
+      type="text"
+      name="zendesk_ticket"
+      autofocus
+      autocomplete="off"
+      inputmode="numeric"
+      placeholder="Ticket ID or ticket URL"
+      data-ticket-input
+    >
+    <div class="notice" data-ticket-preview hidden>
+      <strong data-ticket-fill="subject"></strong>
+      <span class="muted" data-ticket-fill="requester"></span>
+      <span data-ticket-serial-note hidden> — serial found on ticket and filled in below.</span>
+    </div>
+    <div class="notice warn" data-ticket-error hidden></div>
+  </div>
+
+  <div class="card">
     <label for="serial_no"><strong>Serial number</strong> — scan or type, then Enter</label>
     <input
       id="serial_no"
       class="serial-input"
       type="text"
       name="serial_no"
-      autofocus
       required
       autocomplete="off"
       autocapitalize="characters"
@@ -62,8 +81,6 @@
   </div>
 
   <div class="card">
-    <h2>Zendesk ticket <span class="muted">(optional)</span></h2>
-    <input type="text" name="zendesk_ticket" placeholder="Ticket ID or ticket URL" autocomplete="off">
     <label>Reason for return <span class="muted">(optional — can be AI-drafted later)</span>
       <textarea name="reason_for_return" rows="3"></textarea>
     </label>

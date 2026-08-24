@@ -17,14 +17,15 @@ import psycopg
 from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
 
-STATUSES = ["received", "in_inspection", "in_repair", "qc_test", "shipped", "closed"]
+STATUSES = ["received", "in_inspection", "in_repair", "qc_test", "ready", "shipped", "closed"]
 
 # from-status -> set of allowed to-statuses
 ALLOWED_TRANSITIONS: dict[str, set[str]] = {
     "received": {"in_inspection"},
     "in_inspection": {"in_repair", "qc_test"},
     "in_repair": {"qc_test"},
-    "qc_test": {"shipped", "in_repair"},
+    "qc_test": {"ready", "shipped", "in_repair"},
+    "ready": {"shipped", "in_repair"},
     "shipped": {"closed"},
     "closed": set(),
 }
@@ -269,6 +270,7 @@ def list_open_rtms() -> list[dict[str, Any]]:
             """
             SELECT r.id, r.rtm_number, r.serial_no, r.model, r.caliber, r.status,
                    r.repeat_return, r.received_at, r.zendesk_ticket_id,
+                   r.on_hold, r.hold_reason, r.shipped_at,
                    (SELECT count(*) FROM rtm.work_session s
                      WHERE s.rtm_id = r.id AND s.ended_at IS NULL) AS open_sessions
               FROM rtm.rtm r
@@ -327,6 +329,21 @@ def transition(rtm_id: int, to_status: str, tech_id: Optional[int] = None) -> No
                 "INSERT INTO rtm.status_event (rtm_id, status, tech_id) VALUES (%s, %s, %s)",
                 (rtm_id, to_status, tech_id),
             )
+
+
+def set_hold(rtm_id: int, on_hold: bool, reason: Optional[str] = None) -> None:
+    """Flag an RTM as waiting (e.g. on parts or customer) or clear the flag."""
+    with _conn() as conn:
+        conn.execute(
+            """
+            UPDATE rtm.rtm
+               SET on_hold = %s,
+                   hold_reason = CASE WHEN %s THEN %s ELSE NULL END,
+                   updated_at = now()
+             WHERE id = %s
+            """,
+            (on_hold, on_hold, reason, rtm_id),
+        )
 
 
 def clock_in(rtm_id: int, tech_id: int) -> None:
