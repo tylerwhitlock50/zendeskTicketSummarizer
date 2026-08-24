@@ -106,7 +106,7 @@
         {% for row in report.get('root_cause_pareto') or [] %}
         <tr>
           <td>{{ row.get('label') or '—' }}</td>
-          <td class="num">{{ row.get('count', row.get('rtms', 0)) }}</td>
+          <td class="num">{{ row.get('rtm_count', 0) }}</td>
           <td class="num">{{ '%.1f'|format(row.get('cumulative_pct', row.get('cum_pct', 0)) or 0) }}</td>
         </tr>
         {% else %}
@@ -125,7 +125,7 @@
         <thead><tr><th>Responsibility</th><th class="num">Count</th></tr></thead>
         <tbody>
           {% for row in report.get('responsibility_split') or [] %}
-          <tr><td>{{ row.get('label') or '—' }}</td><td class="num">{{ row.get('count', row.get('rtms', 0)) }}</td></tr>
+          <tr><td>{{ row.get('label') or '—' }}</td><td class="num">{{ row.get('rtm_count', 0) }}</td></tr>
           {% else %}
           <tr><td colspan="2">No data.</td></tr>
           {% endfor %}
@@ -140,7 +140,7 @@
         <thead><tr><th>Resolution</th><th class="num">Count</th></tr></thead>
         <tbody>
           {% for row in report.get('resolution_split') or [] %}
-          <tr><td>{{ row.get('label') or '—' }}</td><td class="num">{{ row.get('count', row.get('rtms', 0)) }}</td></tr>
+          <tr><td>{{ row.get('label') or '—' }}</td><td class="num">{{ row.get('rtm_count', 0) }}</td></tr>
           {% else %}
           <tr><td colspan="2">No data.</td></tr>
           {% endfor %}
