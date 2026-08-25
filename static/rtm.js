@@ -198,8 +198,48 @@ function wirePartForm() {
   });
 }
 
+function wireClocks() {
+  // A labor clock that shows a frozen number reads as a stale page. Anything
+  // carrying data-clock-since ticks from its start time; the server-rendered
+  // value is already correct, so this only keeps it honest between reloads.
+  var els = document.querySelectorAll('[data-clock-since]');
+  if (!els.length) return;
+
+  function pad(n) { return n < 10 ? '0' + n : String(n); }
+
+  function tick() {
+    var now = Date.now();
+    els.forEach(function (el) {
+      var started = Date.parse(el.getAttribute('data-clock-since'));
+      if (isNaN(started)) return;
+      var secs = Math.max(0, Math.floor((now - started) / 1000));
+      var text = Math.floor(secs / 3600) + ':' + pad(Math.floor(secs / 60) % 60);
+      var prefix = el.getAttribute('data-clock-prefix');
+      if (prefix) {
+        el.textContent = prefix + text;
+      } else if (el.dataset.clockName) {
+        el.textContent = el.dataset.clockName + ' · ' + text;
+      } else {
+        el.textContent = text;
+      }
+    });
+  }
+
+  els.forEach(function (el) {
+    // "Trevor · 1:20" keeps its name; a bare elapsed cell does not gain one.
+    var parts = el.textContent.split(' · ');
+    if (parts.length === 2 && !el.getAttribute('data-clock-prefix')) {
+      el.dataset.clockName = parts[0];
+    }
+  });
+
+  tick();
+  setInterval(tick, 30000);
+}
+
 document.addEventListener('DOMContentLoaded', function () {
   wireTicketIntake();
   wireIntake();
   wirePartForm();
+  wireClocks();
 });

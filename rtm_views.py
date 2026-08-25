@@ -6,7 +6,7 @@ from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
 from zoneinfo import ZoneInfo
 
-from flask import Blueprint, flash, redirect, render_template, request, url_for
+from flask import Blueprint, flash, redirect, render_template, request, session, url_for
 
 import rtm_db
 import visual_client
@@ -39,6 +39,24 @@ STATUS_LABELS = {
     "shipped": "Shipped",
     "closed": "Closed",
 }
+
+# The stepper across the top of the detail page: the happy path, in order,
+# with labels short enough to sit under a 6px bar.
+STATUS_ORDER = ["received", "in_inspection", "in_repair", "qc_test", "ready", "shipped", "closed"]
+STEP_LABELS = {
+    "received": "Received",
+    "in_inspection": "Inspection",
+    "in_repair": "Repair",
+    "qc_test": "QC",
+    "ready": "Ready",
+    "shipped": "Shipped",
+    "closed": "Closed",
+}
+
+# A rifle nobody has touched in this many days is stale; past this many days in
+# the shop it is at risk. Both drive the bench banner and the "untouched" filter.
+STALE_DAYS = 3
+AT_RISK_DAYS = 14
 
 # Status board ("Domino's tracker") columns: name -> statuses it collects.
 # Any pre-shipment RTM with on_hold=true lands in Waiting instead of its
@@ -90,6 +108,39 @@ def localdt(value):
     return f"{local.strftime('%b %d, %Y')} {local.strftime('%I:%M %p').lstrip('0')}"
 
 
+@rtm_bp.app_template_filter("money")
+def money(value):
+    """Dollars, two places. VISUAL stores unit costs at numeric(12,4) and a line
+    total multiplies that out, so raw Decimals reach the page as $487.500000."""
+    if value is None:
+        return "—"
+    try:
+        return f"{Decimal(str(value)):,.2f}"
+    except (InvalidOperation, ValueError):
+        return str(value)
+
+
+@rtm_bp.app_template_filter("hours")
+def hours(value):
+    """Decimal hours to two places, the way the labor line on an invoice reads."""
+    if value is None:
+        return "0.00"
+    try:
+        return f"{Decimal(str(value)):.2f}"
+    except (InvalidOperation, ValueError):
+        return str(value)
+
+
+@rtm_bp.app_template_filter("logwhen")
+def logwhen(value):
+    """Compact local stamp for the work log, e.g. 'Aug 24 8:02 AM'."""
+    value = _as_utc(value)
+    if value is None:
+        return "—"
+    local = value.astimezone(LOCAL_TZ)
+    return f"{local.strftime('%b %d')} {local.strftime('%I:%M %p').lstrip('0')}"
+
+
 @rtm_bp.app_template_filter("localdate")
 def localdate(value):
     if not value:
@@ -125,21 +176,220 @@ def _days_open(row):
     return (datetime.now(timezone.utc) - started).days
 
 
+def _as_utc(value):
+    """Coerce a timestamp column (or ISO string) to an aware UTC datetime."""
+    if not value:
+        return None
+    if isinstance(value, str):
+        try:
+            value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value
+
+
+def _days_since(value):
+    value = _as_utc(value)
+    return None if value is None else (datetime.now(timezone.utc) - value).days
+
+
+def _localtime(value):
+    """'8:02 AM' in shop-local time, for the sentence on a bench row."""
+    value = _as_utc(value)
+    if value is None:
+        return ""
+    return value.astimezone(LOCAL_TZ).strftime("%I:%M %p").lstrip("0")
+
+
+def _hm(hours):
+    """Decimal hours as '1:20' — how a clock reads, not how a spreadsheet stores it."""
+    if hours is None:
+        return "0:00"
+    total = int(round(float(hours) * 60))
+    return f"{total // 60}:{total % 60:02d}"
+
+
+# ---------------------------------------------------------------- station identity
+
+
+def _current_tech():
+    """Who is at this station, from the session cookie.
+
+    The app has no login: a tech taps their name once in the header and every
+    clock-in, status change, and close on this tablet is attributed to them.
+    Returns None when nobody has claimed the station or the DB is unavailable.
+    """
+    tech_id = session.get("tech_id")
+    if not tech_id:
+        return None
+    try:
+        return rtm_db.get_tech(int(tech_id))
+    except (RuntimeError, ValueError, TypeError):
+        return None
+
+
+@rtm_bp.app_context_processor
+def _inject_station():
+    """Station identity for the header, on RTM pages only.
+
+    The ticket-print routes share the app but not this layout, and must keep
+    rendering when the RTM database is not configured — so skip the queries
+    entirely outside the RTM blueprints.
+    """
+    if request.blueprint not in ("rtm", "rtm_reports"):
+        return {}
+    tech = _current_tech()
+    clock = None
+    techs = []
+    try:
+        techs = rtm_db.get_lookups()["techs"]
+        if tech is not None:
+            clock = next(
+                (s for s in rtm_db.list_open_sessions() if s["tech_id"] == tech["id"]), None
+            )
+    except RuntimeError:
+        pass
+    return {
+        "station_tech": tech,
+        "station_techs": techs,
+        "station_clock": clock,
+        "station_clock_hm": _hm(clock["hours"]) if clock else None,
+    }
+
+
+@rtm_bp.route("/station", methods=["POST"])
+def station():
+    """Claim (or release) this tablet for a tech."""
+    raw = (request.form.get("tech_id") or "").strip()
+    if raw.isdigit() and rtm_db.get_tech(int(raw)):
+        session["tech_id"] = int(raw)
+    else:
+        session.pop("tech_id", None)
+    return redirect(request.form.get("next") or url_for("rtm.worklist"))
+
+
+def _station_tech_id():
+    tech = _current_tech()
+    return tech["id"] if tech else None
+
+
+def _acting_tech_id(field="tech_id"):
+    """The tech a POST should be attributed to: the form's pick, else the station."""
+    return _tech_id_from_form(field) or _station_tech_id()
+
+
 # ---------------------------------------------------------------- worklist
+
+
+def _bench_line(row):
+    """The one sentence a row gets: why this rifle is sitting where it is.
+
+    Returns (tone, text); tone picks the colour, and is never red-on-grey.
+    """
+    idle = row.get("idle_days")
+    if row.get("on_hold"):
+        reason = (row.get("hold_reason") or "something").rstrip(".")
+        tail = f" — no movement in {idle} days" if idle and idle >= STALE_DAYS else ""
+        return "warn", f"Waiting on {reason}{tail}"
+    if row.get("open_session_tech"):
+        since = _localtime(row.get("open_session_started_at"))
+        return "live", f"{row['open_session_tech']} on the clock since {since}"
+    if row.get("status") == "ready":
+        return "plain", "Cleared QC — pack out and print the label"
+    if row.get("status") == "shipped":
+        return "plain", "Shipped — needs a review and close"
+    if row.get("repeat_return"):
+        return "danger", "Second return on this serial"
+    if idle is not None and idle >= STALE_DAYS:
+        return "warn", f"{STATUS_LABELS.get(row.get('status'))} — untouched for {idle} days"
+    return "plain", STATUS_LABELS.get(row.get("status"), row.get("status"))
+
+
+def _bench_action(row, can_clock_in):
+    """The verb for this row. One per rifle, derived from status — never ambiguous.
+
+    kind drives the button's weight: 'chase' is the loud one, 'quiet' just navigates.
+    """
+    if row.get("on_hold"):
+        return {"label": "Chase it", "kind": "chase"}
+    if row.get("status") == "ready":
+        return {"label": "Ship it", "kind": "ship"}
+    if row.get("open_sessions"):
+        return {"label": "Open", "kind": "quiet"}
+    if can_clock_in:
+        return {"label": "Clock in", "kind": "clock"}
+    # Nobody at the station, or they are already on the clock elsewhere — a
+    # "Clock in" button here would only ever produce an error.
+    return {"label": "Open", "kind": "quiet"}
 
 
 @rtm_bp.route("/")
 def worklist():
-    rows = rtm_db.list_open_rtms()
-    groups = []
-    by_status = {}
+    """The bench: every open rifle, oldest first, each with one thing to do next.
+
+    Replaces the status-grouped worklist — status is a colour here, not an
+    ordering. ``view`` filters to the station tech's rifles or to stale ones.
+    """
+    station_tech_id = _station_tech_id()
+    rows = rtm_db.list_open_rtms(tech_id=station_tech_id)
+
+    try:
+        open_sessions = rtm_db.list_open_sessions()
+    except RuntimeError:
+        open_sessions = []
+    # One open session per tech is a hard rule in the schema, so a station tech
+    # who is already on the clock cannot start another.
+    can_clock_in = bool(station_tech_id) and not any(
+        s["tech_id"] == station_tech_id for s in open_sessions
+    )
+
     for row in rows:
-        row["days_open"] = row.get("days_open", _days_open(row))
-        by_status.setdefault(row.get("status"), []).append(row)
-    for status in ALLOWED_TRANSITIONS:
-        if by_status.get(status):
-            groups.append((status, STATUS_LABELS.get(status, status), by_status[status]))
-    return render_template("rtm/worklist.html", groups=groups, total=len(rows))
+        row["days_open"] = _days_open(row)
+        row["idle_days"] = _days_since(row.get("last_activity_at"))
+        row["at_risk"] = (row["days_open"] or 0) >= AT_RISK_DAYS
+        row["stale"] = (row["idle_days"] or 0) >= STALE_DAYS
+        row["line_tone"], row["line"] = _bench_line(row)
+        row["action"] = _bench_action(row, can_clock_in)
+
+    views = [
+        ("all", "Everything", rows),
+        ("mine", "Mine", [r for r in rows if r.get("mine")]),
+        ("stale", f"Untouched {STALE_DAYS}+ days", [r for r in rows if r["stale"]]),
+    ]
+    view = request.args.get("view") or "all"
+    if view not in {key for key, _, _ in views}:
+        view = "all"
+    visible = next(rows_ for key, _, rows_ in views if key == view)
+
+    waiting = [r for r in rows if r.get("on_hold")]
+    ready = [r for r in rows if r.get("status") == "ready"]
+    # The banner calls out one rifle — the oldest that is both old and ignored.
+    at_risk = [r for r in rows if r["at_risk"] and r["stale"]] or [r for r in rows if r["at_risk"]]
+
+    for s in open_sessions:
+        s["elapsed"] = _hm(s.get("hours"))
+        s["since"] = _localtime(s.get("started_at"))
+    busy_ids = {s["tech_id"] for s in open_sessions}
+    idle_techs = [t for t in rtm_db.get_lookups()["techs"] if t["id"] not in busy_ids]
+
+    return render_template(
+        "rtm/worklist.html",
+        rows=visible,
+        total=len(rows),
+        views=[(key, label, len(rows_)) for key, label, rows_ in views],
+        view=view,
+        at_risk=at_risk[0] if at_risk else None,
+        at_risk_count=sum(1 for r in rows if r["at_risk"]),
+        waiting=waiting,
+        ready=ready,
+        open_sessions=open_sessions,
+        idle_techs=idle_techs,
+        today=datetime.now(LOCAL_TZ).strftime("%A, %b %-d"),
+        status_labels=STATUS_LABELS,
+        at_risk_days=AT_RISK_DAYS,
+    )
 
 
 # ---------------------------------------------------------------- status board
@@ -209,7 +459,7 @@ def intake():
         visual=visual,
         zendesk_ticket_id=ticket_id,
         reason_for_return=(request.form.get("reason_for_return") or "").strip() or None,
-        created_by=_tech_id_from_form(),
+        created_by=_acting_tech_id(),
         manual_fields=manual_fields or None,
     )
     flash(f"RTM created for serial {serial}.", "success")
@@ -294,8 +544,89 @@ def _load_rtm_or_404(rtm_id):
     return rtm
 
 
+def _work_log(rtm):
+    """Clock sessions, parts, and status changes as one timeline, newest first.
+
+    Three cards told the same story separately; merged, the total cost explains
+    itself line by line.
+    """
+    entries = []
+    for s in rtm.get("sessions") or []:
+        who = s.get("tech_name") or f"Tech {s.get('tech_id')}"
+        entries.append(
+            {
+                "when": s.get("started_at"),
+                "tone": "live" if s.get("open") else "labor",
+                "text": f"{who} clocked in — still running" if s.get("open")
+                        else f"{who} worked the rifle",
+                "amount": f"{hours(s.get('hours'))} h",
+            }
+        )
+    for line in rtm.get("part_lines") or []:
+        desc = line.get("description") or ""
+        entries.append(
+            {
+                "when": line.get("added_at"),
+                "tone": "part",
+                "text": f"{line.get('part_id')}{f' · {desc}' if desc else ''}",
+                "amount": f"${money(line.get('line_cost'))}",
+            }
+        )
+    for ev in rtm.get("status_events") or []:
+        who = f" by {ev['tech_name']}" if ev.get("tech_name") else ""
+        entries.append(
+            {
+                "when": ev.get("changed_at"),
+                "tone": "status",
+                "text": f"Moved to {STATUS_LABELS.get(ev.get('status'), ev.get('status'))}{who}",
+                "amount": "",
+            }
+        )
+    entries.sort(key=lambda e: _as_utc(e["when"]) or datetime.min.replace(tzinfo=timezone.utc),
+                 reverse=True)
+    return entries
+
+
+def _judgment(label, field, options, selected_id, shown=3):
+    """One findings row: the picked option first, the tail collapsed behind '+N more'.
+
+    Findings gate close(), so they belong on the page where the work happens —
+    not on a route people only meet as an error message.
+    """
+    ordered = sorted(options, key=lambda o: o["id"] != selected_id)
+    # Hiding a single option behind a disclosure costs more than it saves.
+    if len(ordered) - shown <= 1:
+        shown = len(ordered)
+    return {
+        "label": label,
+        "field": field,
+        "visible": ordered[:shown],
+        "hidden": ordered[shown:],
+        "selected_id": selected_id,
+        "required": selected_id is None,
+    }
+
+
+def _steps(rtm):
+    """The status stepper: visited, current, or still ahead."""
+    current = rtm.get("status")
+    visited = {ev.get("status") for ev in rtm.get("status_events") or []}
+    out = []
+    for status in STATUS_ORDER:
+        if status == current:
+            state = "current"
+        elif status in visited:
+            state = "done"
+        else:
+            state = "todo"
+        out.append({"status": status, "label": STEP_LABELS[status], "state": state})
+    return out
+
+
 @rtm_bp.route("/<int:rtm_id>")
 def detail(rtm_id):
+    """One rifle, in the order a tech meets it: why it came back, what you found,
+    what it has cost, and the single next step."""
     rtm = _load_rtm_or_404(rtm_id)
     if rtm is None:
         return render_template("error.html", ticket_id=rtm_id, message="RTM not found."), 404
@@ -303,6 +634,10 @@ def detail(rtm_id):
     status = rtm.get("status")
     allowed = ALLOWED_TRANSITIONS.get(status, [])
     open_sessions = [s for s in rtm.get("sessions", []) if s.get("open")]
+
+    station_id = _station_tech_id()
+    my_session = next((s for s in open_sessions if s.get("tech_id") == station_id), None)
+
     return render_template(
         "rtm/detail.html",
         rtm=rtm,
@@ -310,6 +645,26 @@ def detail(rtm_id):
         allowed=allowed,
         status_labels=STATUS_LABELS,
         open_sessions=open_sessions,
+        my_session=my_session,
+        my_session_hm=_hm(my_session["hours"]) if my_session else None,
+        steps=_steps(rtm),
+        work_log=_work_log(rtm),
+        judgments=[
+            _judgment("Root cause", "root_cause_id", lookups["root_cause"],
+                      rtm.get("root_cause_id")),
+            _judgment("Responsibility", "responsibility_id", lookups["responsibility"],
+                      rtm.get("responsibility_id")),
+            _judgment("Resolution", "resolution_id", lookups["resolution"],
+                      rtm.get("resolution_id")),
+        ],
+        days_open=_days_open(rtm),
+        at_risk_days=AT_RISK_DAYS,
+        # Closing goes through close(), which enforces root cause / responsibility /
+        # resolution. A raw transition to 'closed' would walk straight past that
+        # gate, so it never gets a button of its own.
+        forward=[s for s in allowed if s != "closed"],
+        close_is_next="closed" in allowed,
+        closeable=status in ("qc_test", "ready", "shipped"),
     )
 
 
@@ -317,7 +672,7 @@ def detail(rtm_id):
 def status(rtm_id):
     to_status = (request.form.get("to_status") or "").strip()
     try:
-        rtm_db.transition(rtm_id, to_status, tech_id=_tech_id_from_form())
+        rtm_db.transition(rtm_id, to_status, tech_id=_acting_tech_id())
         flash(f"Status changed to {STATUS_LABELS.get(to_status, to_status)}.", "success")
     except InvalidTransition as exc:
         flash(str(exc) or f"Cannot move to {to_status} from the current status.", "warning")
@@ -339,7 +694,7 @@ def hold(rtm_id):
 
 @rtm_bp.route("/<int:rtm_id>/clock-in", methods=["POST"])
 def clock_in(rtm_id):
-    tech_id = _tech_id_from_form()
+    tech_id = _acting_tech_id()
     if tech_id is None:
         flash("Pick a tech before clocking in.", "warning")
         return redirect(url_for("rtm.detail", rtm_id=rtm_id))
@@ -353,7 +708,7 @@ def clock_in(rtm_id):
 
 @rtm_bp.route("/<int:rtm_id>/clock-out", methods=["POST"])
 def clock_out(rtm_id):
-    tech_id = _tech_id_from_form()
+    tech_id = _acting_tech_id()
     if tech_id is None:
         flash("Pick a tech before clocking out.", "warning")
         return redirect(url_for("rtm.detail", rtm_id=rtm_id))
@@ -410,7 +765,7 @@ def add_part(rtm_id):
         part.get("description") or "",
         qty,
         part.get("unit_cost") or Decimal("0"),
-        _tech_id_from_form(),
+        _acting_tech_id(),
     )
     flash(f"Added {qty} x {part['part_id']}.", "success")
     return redirect(url_for("rtm.detail", rtm_id=rtm_id))
@@ -475,7 +830,7 @@ def close(rtm_id):
 
     if request.method == "POST":
         try:
-            rtm_db.close_rtm(rtm_id, _tech_id_from_form())
+            rtm_db.close_rtm(rtm_id, _acting_tech_id())
             flash(f"{rtm.get('rtm_number', 'RTM')} closed.", "success")
             return redirect(url_for("rtm.worklist"))
         except (ValueError, InvalidTransition) as exc:
