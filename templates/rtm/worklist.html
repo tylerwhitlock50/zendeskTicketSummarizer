@@ -1,40 +1,143 @@
 {% extends "rtm/base.html" %}
 
+{% block title %}Bench — RTM Tracker{% endblock %}
+
 {% block rtm_content %}
-<div class="worklist-head">
-  <h1>Open RTMs <span class="muted">({{ total }})</span></h1>
-  <a class="btn-big" href="{{ url_for('rtm.intake') }}">+ New RTM</a>
+{#  The bench: every open rifle, oldest first, each with one thing to do next.
+    Status is a colour here, not an ordering — grouping by status put the newest
+    rifle on top and buried the one that has been in the shop a month. #}
+
+<div class="bench-head">
+  <div>
+    <h1 class="bench-date">{{ today }}</h1>
+    <p class="bench-summary">
+      {{ total }} open{% if waiting %} · {{ waiting|length }} waiting on someone else{% endif %}{% if at_risk_count %} · {{ at_risk_count }} past {{ at_risk_days }} days{% endif %}
+    </p>
+  </div>
+  <a class="btn-big" href="{{ url_for('rtm.intake') }}">+ Receive a rifle</a>
 </div>
 
-{% if not groups %}
-<div class="card">
-  <p>No open RTMs. Scan a rifle in with <a href="{{ url_for('rtm.intake') }}">New RTM</a>.</p>
+{% if at_risk %}
+{#  One thing shouts. If nothing is at risk, the banner is simply not here. #}
+<div class="bench-banner">
+  <p>
+    <strong>{{ at_risk.rtm_number }} has been in the shop {{ at_risk.days_open }} days</strong>{% if at_risk.on_hold and at_risk.hold_reason %} — waiting on {{ at_risk.hold_reason }}{% endif %}.{% if at_risk.idle_days %} Nobody has touched it in {{ at_risk.idle_days }} day{{ 's' if at_risk.idle_days != 1 }}.{% endif %}
+  </p>
+  <a class="btn-verb chase" href="{{ url_for('rtm.detail', rtm_id=at_risk.id) }}">Open</a>
 </div>
 {% endif %}
 
-{% for status, label, rows in groups %}
-<section class="worklist-group">
-  <h2><span class="status-badge status-{{ status }}">{{ label }}</span> <span class="muted">{{ rows|length }}</span></h2>
-  {% for r in rows %}
-  <a class="card rtm-card" href="{{ url_for('rtm.detail', rtm_id=r.get('id')) }}">
-    <div class="grid2">
-      <div>
-        <strong>{{ r.get('rtm_number') }}</strong>
-        <div>SN {{ r.get('serial_no') }}</div>
-        <div class="muted">{{ r.get('model') or '—' }} {{ r.get('caliber') or '' }}</div>
-      </div>
-      <div>
-        {% if r.get('days_open') is not none %}
-        <div>{{ r.get('days_open') }} day{{ 's' if r.get('days_open') != 1 }} open</div>
-        {% endif %}
-        {% if r.get('repeat_return') %}<span class="status-badge danger">Repeat return</span>{% endif %}
-        {% if r.get('open_session') or r.get('has_open_session') %}
-        <span class="status-badge">Tech clocked in</span>
-        {% endif %}
+{% if not total %}
+<div class="card">
+  <p>No open RTMs. Scan a rifle in with <a href="{{ url_for('rtm.intake') }}">New RTM</a>.</p>
+</div>
+{% else %}
+
+<div class="bench-layout">
+  <div>
+    <div class="bench-listhead">
+      <span class="eyebrow">Oldest first — the order the shop should work it</span>
+      <div class="chips">
+        {% for key, label, count in views %}
+        <a class="chip" href="{{ url_for('rtm.worklist', view=key) }}"
+           {% if key == view %}aria-current="page"{% endif %}>{{ label }} ({{ count }})</a>
+        {% endfor %}
       </div>
     </div>
-  </a>
-  {% endfor %}
-</section>
-{% endfor %}
+
+    <div class="bench-list">
+      {% for r in rows %}
+      <article class="bench-row status-{{ r.status }}">
+        <div class="bench-age">
+          {#  The day count is the headline number: it is what decides the order. #}
+          <span class="bench-age-num{% if r.at_risk %} danger{% endif %}">{{ r.days_open if r.days_open is not none else '—' }}</span>
+          <span class="bench-age-label">DAYS</span>
+        </div>
+
+        <div class="bench-body">
+          <div class="bench-title">
+            {#  The rifle in your hands has a serial stamped on it; the RTM number
+                is a database key. Serial leads. #}
+            <a class="bench-serial" href="{{ url_for('rtm.detail', rtm_id=r.id) }}">{{ r.serial_no }}</a>
+            <span class="bench-rtm">{{ r.rtm_number }}</span>
+            {% if r.repeat_return %}<span class="repeat-badge">Repeat return</span>{% endif %}
+          </div>
+          <div class="bench-model">{{ r.model or '—' }}{% if r.caliber %} · {{ r.caliber }}{% endif %}</div>
+          <div class="bench-line tone-{{ r.line_tone }}">{{ r.line }}</div>
+        </div>
+
+        <div class="bench-actions">
+          <span class="status-badge status-{{ r.status }}">{{ status_labels.get(r.status, r.status) }}</span>
+          {#  Every row says what to do next. The verb comes from the status, so
+              it is never ambiguous — and each one actually does the thing. #}
+          {% set action = r.action %}
+          {% if action.kind == 'ship' %}
+          <form method="post" action="{{ url_for('rtm.status', rtm_id=r.id) }}">
+            <input type="hidden" name="to_status" value="shipped">
+            <button type="submit" class="btn-verb ship">{{ action.label }}</button>
+          </form>
+          {% elif action.kind == 'clock' %}
+          <form method="post" action="{{ url_for('rtm.clock_in', rtm_id=r.id) }}">
+            <button type="submit" class="btn-verb clock">{{ action.label }}</button>
+          </form>
+          {% else %}
+          <a class="btn-verb {{ action.kind }}" href="{{ url_for('rtm.detail', rtm_id=r.id) }}">{{ action.label }}</a>
+          {% endif %}
+        </div>
+      </article>
+      {% else %}
+      <div class="card"><p class="muted">Nothing in this filter.</p></div>
+      {% endfor %}
+    </div>
+  </div>
+
+  <aside class="bench-side">
+    <section class="side-card">
+      <h2>On the clock right now</h2>
+      {% for s in open_sessions %}
+      <a class="clock-row" href="{{ url_for('rtm.detail', rtm_id=s.rtm_id) }}">
+        <span class="clock-dot"></span>
+        <span class="clock-who">
+          <span class="clock-name">{{ s.tech_name }}</span>
+          <span class="clock-what">{{ s.serial_no }} · since {{ s.since }}</span>
+        </span>
+        <span class="clock-elapsed" data-clock-since="{{ s.started_at.isoformat() }}">{{ s.elapsed }}</span>
+      </a>
+      {% endfor %}
+      {% for t in idle_techs %}
+      <div class="clock-row idle">
+        <span class="clock-dot"></span>
+        <span class="clock-who"><span class="clock-name">{{ t.name }} — not clocked in</span></span>
+      </div>
+      {% endfor %}
+    </section>
+
+    {% if waiting %}
+    <section class="side-card">
+      <h2>Waiting on someone else</h2>
+      {% for w in waiting %}
+      <a class="wait-row" href="{{ url_for('rtm.detail', rtm_id=w.id) }}">
+        <span>
+          <span class="wait-serial">{{ w.serial_no }}</span>
+          <span class="wait-reason">{{ w.hold_reason or 'Waiting' }}</span>
+        </span>
+        <span class="wait-age">{{ w.idle_days }}d</span>
+      </a>
+      {% endfor %}
+    </section>
+    {% endif %}
+
+    {% if ready %}
+    <section class="side-card">
+      <h2>Ready to pack out</h2>
+      <p class="side-count">{{ ready|length }}</p>
+      <p class="side-note">
+        {% for r in ready %}{{ r.serial_no }}{{ ', ' if not loop.last }}{% endfor %}
+        cleared QC and {{ 'are' if ready|length != 1 else 'is' }} waiting on a shipping label.
+      </p>
+    </section>
+    {% endif %}
+  </aside>
+</div>
+{% endif %}
 {% endblock %}

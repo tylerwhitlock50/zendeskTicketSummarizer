@@ -2,57 +2,60 @@
 
 {% block rtm_content %}
 <style>
-  .month-picker { display: flex; align-items: center; gap: 0.75rem; margin-bottom: 1rem; flex-wrap: wrap; }
-  .month-picker h2 { margin: 0; }
-  .month-picker input[type="month"] { min-height: 44px; font-size: 1rem; padding: 0.25rem 0.5rem; }
+  /* Table styling comes from rtm.css — the local copy here fought it and won,
+     which is why the header row read as grey-on-grey instead of the dark bar. */
+  .month-picker { display: flex; align-items: center; gap: 12px; margin-bottom: 18px; flex-wrap: wrap; }
+  .month-picker h2 { margin: 0; font-size: 26px; letter-spacing: -0.3px; }
+  .month-picker input[type="month"] { width: auto; min-height: 48px; }
   .table-wrap { overflow-x: auto; }
-  .report-table { width: 100%; border-collapse: collapse; font-size: 0.95rem; }
-  .report-table th, .report-table td { padding: 0.5rem 0.75rem; text-align: left; border-bottom: 1px solid #ddd; }
-  .report-table th { border-bottom: 2px solid #999; }
   .report-table td.num, .report-table th.num { text-align: right; font-variant-numeric: tabular-nums; }
-  .stat-value { font-size: 1.6rem; font-weight: 700; margin: 0.15rem 0 0; }
-  .stat-label { margin: 0; font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.04em; opacity: 0.7; }
-  .card-head { display: flex; justify-content: space-between; align-items: baseline; gap: 1rem; flex-wrap: wrap; }
-  .card-head h3 { margin: 0; }
-  .unavailable { opacity: 0.6; font-style: italic; }
+  .stat-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; margin-bottom: 18px; }
+  .stat .eyebrow { display: block; margin: 0; }
+  .stat { padding: 16px 18px; background: var(--rtm-card); border: 1px solid #dfe4e9; border-radius: 12px; }
+  .stat-value { margin: 6px 0 0; font-size: 34px; font-weight: 700; line-height: 1; font-variant-numeric: tabular-nums; }
+  .card-head { display: flex; justify-content: space-between; align-items: baseline; gap: 16px; flex-wrap: wrap; margin-bottom: 12px; }
+  .card-head h3 { margin: 0; font-size: 18px; }
+  /* Was opacity 0.6 on a white card — under the AA line. */
+  .unavailable { color: #8a4500; font-style: italic; }
+  @media (max-width: 900px) { .stat-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
   @media print {
     nav, .month-picker form, .month-picker a, .csv-btn { display: none !important; }
   }
 </style>
 
 <div class="month-picker">
-  <a class="btn-big" href="{{ url_for('rtm_reports.reports', month=prev_month) }}">&larr; Prev</a>
+  <a class="btn-big secondary" href="{{ url_for('rtm_reports.reports', month=prev_month) }}">&larr; Prev</a>
   <h2>{{ month_label }}</h2>
-  <a class="btn-big" href="{{ url_for('rtm_reports.reports', month=next_month) }}">Next &rarr;</a>
+  <a class="btn-big secondary" href="{{ url_for('rtm_reports.reports', month=next_month) }}">Next &rarr;</a>
   <form method="get" action="{{ url_for('rtm_reports.reports') }}">
     <input type="month" name="month" value="{{ month_value }}" onchange="this.form.submit()">
     <noscript><button type="submit" class="btn-big">Go</button></noscript>
   </form>
 </div>
 
-<div class="grid2">
-  <div class="card">
-    <p class="stat-label">RTMs received</p>
+<div class="stat-grid">
+  <div class="stat">
+    <p class="eyebrow">RTMs received</p>
     <p class="stat-value">{{ report.get('received_count', 0) }}</p>
   </div>
-  <div class="card">
-    <p class="stat-label">RTMs closed</p>
+  <div class="stat">
+    <p class="eyebrow">RTMs closed</p>
     <p class="stat-value">{{ report.get('closed_count', 0) }}</p>
   </div>
-  <div class="card">
-    <p class="stat-label">Total repair spend</p>
+  <div class="stat">
+    <p class="eyebrow">Total repair spend</p>
     <p class="stat-value">${{ '%.2f'|format(report.get('total_cost') or 0) }}</p>
   </div>
-  <div class="card">
-    <p class="stat-label">Avg repair cost</p>
+  <div class="stat">
+    <p class="eyebrow">Avg repair cost</p>
     <p class="stat-value">${{ '%.2f'|format(report.get('avg_total_cost') or 0) }}</p>
   </div>
-  <div class="card">
-    <p class="stat-label">Avg touch hours</p>
+  <div class="stat">
+    <p class="eyebrow">Avg touch hours</p>
     <p class="stat-value">{{ '%.1f'|format(report.get('avg_touch_hours') or 0) }}</p>
   </div>
-  <div class="card">
-    <p class="stat-label">Avg calendar days</p>
+  <div class="stat">
+    <p class="eyebrow">Avg calendar days</p>
     <p class="stat-value">{{ '%.1f'|format(report.get('avg_calendar_days') or 0) }}</p>
   </div>
 </div>
@@ -60,7 +63,7 @@
 <div class="card">
   <div class="card-head">
     <h3>RTM rate by model / caliber</h3>
-    <a class="btn-big csv-btn" href="{{ url_for('rtm_reports.reports_csv', month=month_value, report='rate') }}">Download CSV</a>
+    <a class="btn-big secondary csv-btn" href="{{ url_for('rtm_reports.reports_csv', month=month_value, report='rate') }}">Download CSV</a>
   </div>
   {% if rates_unavailable %}
     <p class="unavailable">Shipped units and rates unavailable — VISUAL could not be reached.</p>
@@ -97,7 +100,7 @@
 <div class="card">
   <div class="card-head">
     <h3>Root-cause Pareto</h3>
-    <a class="btn-big csv-btn" href="{{ url_for('rtm_reports.reports_csv', month=month_value, report='pareto') }}">Download CSV</a>
+    <a class="btn-big secondary csv-btn" href="{{ url_for('rtm_reports.reports_csv', month=month_value, report='pareto') }}">Download CSV</a>
   </div>
   <div class="table-wrap">
     <table class="report-table">
@@ -153,7 +156,7 @@
 <div class="card">
   <div class="card-head">
     <h3>Repeat returns</h3>
-    <a class="btn-big csv-btn" href="{{ url_for('rtm_reports.reports_csv', month=month_value, report='detail') }}">Download CSV</a>
+    <a class="btn-big secondary csv-btn" href="{{ url_for('rtm_reports.reports_csv', month=month_value, report='detail') }}">Download CSV</a>
   </div>
   <div class="table-wrap">
     <table class="report-table">

@@ -9,13 +9,34 @@
 </head>
 <body class="rtm-page">
   <header class="rtm-header no-print">
-    <a class="rtm-title" href="/rtm/">RTM Tracker</a>
-    <nav class="rtm-nav">
-      <a class="btn-big secondary" href="/rtm/">Worklist</a>
-      <a class="btn-big secondary" href="/rtm/intake">New RTM</a>
-      <a class="btn-big secondary" href="/rtm/board">Board</a>
-      <a class="btn-big secondary" href="/rtm/reports">Reports</a>
-    </nav>
+    <div class="rtm-header-left">
+      <a class="rtm-title" href="/rtm/">RTM Tracker</a>
+      <nav class="rtm-nav">
+        {% set here = request.path %}
+        <a href="/rtm/" {% if here == '/rtm/' %}aria-current="page"{% endif %}>Bench</a>
+        <a href="/rtm/board" {% if here.startswith('/rtm/board') %}aria-current="page"{% endif %}>Board</a>
+        <a href="/rtm/intake" {% if here.startswith('/rtm/intake') %}aria-current="page"{% endif %}>New RTM</a>
+        <a href="/rtm/reports" {% if here.startswith('/rtm/reports') %}aria-current="page"{% endif %}>Reports</a>
+      </nav>
+    </div>
+
+    {# Who is at this station. The app has no login; a tech taps their name once
+       and every clock-in, status change, and close on this tablet is theirs. #}
+    <form class="station" method="post" action="{{ url_for('rtm.station') }}">
+      <input type="hidden" name="next" value="{{ request.full_path }}">
+      <label class="station-label" for="station-tech">Station</label>
+      <select class="station-pick" id="station-tech" name="tech_id" onchange="this.form.submit()">
+        <option value="">Nobody — pick a name</option>
+        {% for tech in station_techs %}
+        <option value="{{ tech.id }}" {% if station_tech and station_tech.id == tech.id %}selected{% endif %}>{{ tech.name }}</option>
+        {% endfor %}
+      </select>
+      <noscript><button type="submit" class="chip">Set</button></noscript>
+      {% if station_clock %}
+      <a class="clocked-badge station-clock" href="{{ url_for('rtm.detail', rtm_id=station_clock.rtm_id) }}"
+         data-clock-since="{{ station_clock.started_at.isoformat() }}">{{ station_tech.name }} · {{ station_clock_hm }}</a>
+      {% endif %}
+    </form>
   </header>
 
   <div class="flash-area no-print">

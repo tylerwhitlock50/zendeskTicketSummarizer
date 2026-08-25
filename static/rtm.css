@@ -177,6 +177,20 @@ body.rtm-page {
   .grid2 { grid-template-columns: 1fr; }
 }
 
+/* ---------- Status colours ----------
+   The six status colours are unchanged — people already know them. What is new
+   is that any element can pick one up as --st, so a row or card can wear its
+   status as a left colour bar that reads from across the shop, not only at
+   reading distance. */
+
+.status-received      { --st: #5b636b; }
+.status-in_inspection { --st: #b56a00; }
+.status-in_repair     { --st: #1d5fa8; }
+.status-qc_test       { --st: #6a3fa0; }
+.status-ready         { --st: #b8860b; }
+.status-shipped       { --st: #1d7a3d; }
+.status-closed        { --st: #1a1d21; }
+
 /* ---------- Status badges ---------- */
 
 .status-badge {
@@ -187,25 +201,45 @@ body.rtm-page {
   font-weight: 700;
   white-space: nowrap;
   color: #fff;
-  background: var(--rtm-muted);
+  background: var(--st, var(--rtm-muted));
 }
 
-.status-badge.status-received      { background: #5b636b; }
-.status-badge.status-in_inspection { background: #b56a00; }
-.status-badge.status-in_repair     { background: #1d5fa8; }
-.status-badge.status-qc_test       { background: #6a3fa0; }
-.status-badge.status-shipped       { background: #1d7a3d; }
-.status-badge.status-closed        { background: #1a1d21; }
-
+/* Was red text on the badge's grey fill — near-identical luminance, so the most
+   urgent flag on the page was the hardest thing to read. Red fill, white text. */
+.status-badge.danger,
 .repeat-badge {
   display: inline-block;
   padding: 4px 14px;
   border-radius: 999px;
-  font-size: 0.95rem;
+  font-size: 0.85rem;
   font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
   white-space: nowrap;
   color: #fff;
-  background: #d97706;
+  background: var(--rtm-danger);
+}
+
+/* Grey read as "disabled", and never said who or for how long. */
+.clocked-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 14px;
+  border-radius: 999px;
+  font-size: 0.95rem;
+  font-weight: 600;
+  white-space: nowrap;
+  color: #fff;
+  background: var(--rtm-success);
+}
+
+.clocked-badge::before {
+  content: "";
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #8ff0b0;
 }
 
 .danger { color: var(--rtm-danger); }
@@ -339,24 +373,25 @@ body.rtm-page {
 .notice.warn   { background: #fdf3e3; border-color: #e3c58a; }
 .notice.danger { background: #fbe9e7; border-color: #e0a49b; }
 
-/* ---------- Status badge for the new 'ready' state ---------- */
-
-.status-badge.status-ready { background: #b8860b; }
-
 /* ---------- Status board (wall display) ---------- */
 
+/* Five columns is the wall-display layout. Below that the columns get narrower
+   than a serial number, so fold rather than hyphenate. */
 .board {
   display: grid;
-  grid-template-columns: repeat(5, 1fr);
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 12px;
   align-items: start;
 }
 
+@media (max-width: 1400px) {
+  .board { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
 @media (max-width: 1000px) {
-  .board { grid-template-columns: repeat(2, 1fr); }
+  .board { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 @media (max-width: 600px) {
-  .board { grid-template-columns: 1fr; }
+  .board { grid-template-columns: minmax(0, 1fr); }
 }
 
 .board-col {
@@ -385,9 +420,14 @@ body.rtm-page {
 .board-col-ready   .board-count { background: #b8860b; }
 .board-col-shipped .board-count { background: #1d7a3d; }
 
+/* A wall display is read at ten feet. The day count is the number that decides
+   whether anyone walks over, so it is the biggest thing on the card; the status
+   word it used to share a grey-on-grey line with becomes the caption. */
+
 .board-card {
   display: block;
   background: var(--rtm-card);
+  border-left: 6px solid var(--st, var(--rtm-border));
   border-radius: 10px;
   padding: 10px 12px;
   margin-bottom: 8px;
@@ -396,11 +436,704 @@ body.rtm-page {
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.10);
 }
 
-.board-rtm    { display: block; font-weight: 700; }
-.board-serial { display: block; font-size: 0.95rem; color: var(--rtm-muted); }
-.board-model  { display: block; font-size: 0.9rem; }
-.board-meta   { display: block; font-size: 0.85rem; margin-top: 4px; color: var(--rtm-muted); }
-.board-days   { font-weight: 600; margin-left: 6px; }
-.board-hold-reason { color: #b25b00; font-weight: 600; }
-.board-active { color: #1d7a3d; }
+/* The day count leads the card and the status word captions it, instead of the
+   two sharing one 15px grey-on-grey line. */
+.board-age {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin-bottom: 2px;
+}
+
+.board-days {
+  font-size: 1.7rem;
+  font-weight: 700;
+  line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+  color: var(--rtm-text);
+}
+
+.board-days.danger { color: var(--rtm-danger); }
+
+.board-days-label {
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--rtm-muted);
+}
+
+/* A serial is one token; let the card scroll it rather than break it in half. */
+.board-serial {
+  display: block;
+  font-weight: 700;
+  font-size: 1.05rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.board-model { display: block; font-size: 0.9rem; color: var(--rtm-text); }
+.board-rtm   { display: block; font-size: 0.85rem; color: var(--rtm-muted); }
+
+.board-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 4px;
+  font-size: 0.9rem;
+  color: var(--rtm-text);
+}
+
+.board-hold-reason { color: #8a4500; font-weight: 700; }
+.board-active { color: #14532d; font-weight: 700; }
+
+.board-meta .repeat-badge { padding: 2px 8px; font-size: 0.72rem; }
+
 .board-empty  { text-align: center; margin: 20px 0; }
+
+/* ================================================================
+   The bench (worklist) and the resequenced RTM detail page.
+
+   Sizes here are in px rather than rem: these screens were designed at a
+   fixed tablet width, and `html { font-size: 18px }` above would scale them
+   away from the drawing.
+   ================================================================ */
+
+/* ---------- Dark app header + station identity ---------- */
+
+.rtm-header {
+  padding: 12px 22px;
+  background: #12161a;
+  border-bottom: none;
+}
+
+.rtm-title { color: #fff; font-size: 20px; letter-spacing: -0.2px; }
+
+.rtm-header-left {
+  display: flex;
+  align-items: center;
+  gap: 22px;
+  flex-wrap: wrap;
+}
+
+.rtm-nav { gap: 4px; }
+
+.rtm-nav a {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 0 18px;
+  border-radius: 8px;
+  font-size: 16px;
+  font-weight: 600;
+  color: #9aa4ad;
+  text-decoration: none;
+}
+
+.rtm-nav a:hover { color: #fff; background: #1e252c; }
+.rtm-nav a[aria-current="page"] { background: #2a3138; color: #fff; }
+
+.station {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0;
+}
+
+.station-label { font-size: 14px; color: #9aa4ad; }
+
+.station-pick {
+  min-height: 44px;
+  padding: 0 12px;
+  font-size: 15px;
+  font-family: inherit;
+  color: #e8edf1;
+  background: #2a3138;
+  border: 1px solid #3c444c;
+  border-radius: 8px;
+}
+
+.station-clock {
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------- Bench ---------- */
+
+.bench-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin-bottom: 18px;
+}
+
+.bench-date { margin: 0; font-size: 26px; line-height: 1.2; letter-spacing: -0.3px; }
+.bench-summary { margin: 2px 0 0; font-size: 15px; color: var(--rtm-muted); }
+
+.bench-banner {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin-bottom: 18px;
+  padding: 14px 18px;
+  background: #fceceb;
+  border-left: 6px solid var(--rtm-danger);
+  border-radius: 10px;
+}
+
+.bench-banner p { flex: 1; margin: 0; font-size: 16px; line-height: 1.45; color: #7f1d1d; }
+
+.bench-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 320px;
+  gap: 18px;
+  align-items: start;
+}
+
+.bench-listhead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.eyebrow {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: #6b747c;
+}
+
+.chips { display: flex; gap: 6px; flex-wrap: wrap; }
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 36px;
+  padding: 0 14px;
+  border-radius: 18px;
+  font-size: 14px;
+  font-weight: 600;
+  white-space: nowrap;
+  text-decoration: none;
+  color: var(--rtm-text);
+  background: var(--rtm-card);
+  border: 1.5px solid var(--rtm-border);
+}
+
+.chip[aria-current="page"] { background: #12161a; border-color: #12161a; color: #fff; }
+
+.bench-list { display: flex; flex-direction: column; gap: 12px; }
+
+.bench-row {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  padding: 14px 18px;
+  background: var(--rtm-card);
+  border: 1px solid #dfe4e9;
+  border-left: 6px solid var(--st, var(--rtm-border));
+  border-radius: 12px;
+}
+
+.bench-age {
+  flex: none;
+  width: 78px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.bench-age-num {
+  font-size: 26px;
+  font-weight: 700;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+
+.bench-age-num.danger { color: var(--rtm-danger); }
+
+.bench-age-label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  color: #8a939c;
+}
+
+.bench-body { flex: 1; min-width: 0; }
+
+.bench-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.bench-serial {
+  font-size: 19px;
+  font-weight: 700;
+  letter-spacing: -0.2px;
+  color: var(--rtm-text);
+  text-decoration: none;
+}
+
+.bench-serial:hover { text-decoration: underline; }
+.bench-rtm { font-size: 15px; color: var(--rtm-muted); }
+.bench-model { font-size: 15px; color: #4a525a; }
+
+.bench-line { font-size: 15px; }
+.bench-line.tone-plain  { color: #4a525a; }
+.bench-line.tone-warn   { color: #8a4500; }
+.bench-line.tone-live   { color: #14532d; font-weight: 600; }
+.bench-line.tone-danger { color: var(--rtm-danger); font-weight: 600; }
+
+.bench-actions {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.bench-actions form { margin: 0; }
+
+/* Verb buttons: one per row, weighted by how much it wants your attention. */
+.btn-verb {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 48px;
+  padding: 0 18px;
+  font-size: 15px;
+  font-weight: 600;
+  font-family: inherit;
+  white-space: nowrap;
+  border-radius: 9px;
+  border: 2px solid transparent;
+  cursor: pointer;
+  text-decoration: none;
+  touch-action: manipulation;
+}
+
+.btn-verb.chase { background: var(--rtm-card); border-color: var(--rtm-danger); color: var(--rtm-danger); }
+.btn-verb.ship  { background: var(--rtm-success); color: #fff; }
+.btn-verb.clock { background: var(--rtm-primary); color: #fff; }
+.btn-verb.quiet { background: var(--rtm-card); border-color: var(--rtm-border); color: var(--rtm-primary); }
+
+.btn-verb.chase:hover { background: #fceceb; }
+.btn-verb.ship:hover  { background: #17632f; }
+.btn-verb.clock:hover { background: var(--rtm-primary-dark); }
+.btn-verb.quiet:hover { background: #e8eff7; }
+
+/* ---------- Bench sidebar ---------- */
+
+.bench-side { display: flex; flex-direction: column; gap: 14px; }
+
+.side-card {
+  padding: 16px 18px;
+  background: var(--rtm-card);
+  border: 1px solid #dfe4e9;
+  border-radius: 12px;
+}
+
+.side-card h2 { margin: 0 0 12px; font-size: 16px; }
+
+.clock-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 8px;
+  padding: 12px 14px;
+  border-radius: 10px;
+  background: #e8f5ec;
+  text-decoration: none;
+}
+
+.clock-row.idle { background: #f2f4f6; }
+
+.clock-dot {
+  flex: none;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--rtm-success);
+}
+
+.clock-row.idle .clock-dot { background: #c3c9d0; }
+
+.clock-who { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+.clock-name { font-size: 15px; font-weight: 600; color: #14532d; }
+.clock-what { font-size: 13px; color: #2f6b46; }
+.clock-row.idle .clock-name { font-weight: 400; color: var(--rtm-muted); }
+
+.clock-elapsed {
+  font-size: 17px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: #14532d;
+}
+
+.wait-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 0;
+  border-top: 1px solid #eef1f4;
+  text-decoration: none;
+  color: inherit;
+}
+
+.wait-serial { font-size: 15px; font-weight: 600; }
+.wait-reason { display: block; font-size: 13px; color: #8a4500; }
+.wait-age { font-size: 14px; font-weight: 600; color: var(--rtm-muted); font-variant-numeric: tabular-nums; }
+
+.side-count {
+  margin: 0;
+  font-size: 34px;
+  font-weight: 700;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+
+.side-note { margin: 8px 0 0; font-size: 14px; color: var(--rtm-muted); }
+
+/* ---------- Detail ---------- */
+
+.detail-top {
+  margin: -20px -16px 16px;
+  padding: 16px 22px;
+  background: var(--rtm-card);
+  border-bottom: 1px solid #dfe4e9;
+}
+
+.detail-headline {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.detail-serial {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin: 0;
+  font-size: 30px;
+  line-height: 1.1;
+  letter-spacing: -0.5px;
+}
+
+.detail-sub { margin: 4px 0 0; font-size: 16px; color: var(--rtm-muted); }
+.detail-sub .danger { font-weight: 700; }
+
+.detail-head-actions { flex: none; display: flex; gap: 10px; flex-wrap: wrap; }
+.detail-head-actions form { margin: 0; }
+
+.btn-clock {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 56px;
+  padding: 0 22px;
+  font-size: 17px;
+  font-weight: 600;
+  font-family: inherit;
+  white-space: nowrap;
+  color: #fff;
+  background: var(--rtm-success);
+  border: none;
+  border-radius: 10px;
+  cursor: pointer;
+  text-decoration: none;
+}
+
+.btn-clock:hover { background: #17632f; }
+
+/* Status stepper — where this rifle is on the path, not a list of buttons. */
+.stepper { display: flex; gap: 4px; margin-top: 12px; }
+.step { flex: 1; display: flex; flex-direction: column; gap: 5px; }
+
+.step-bar { height: 6px; border-radius: 3px; background: #e2e6ea; }
+.step-label { font-size: 12px; font-weight: 600; color: #a3abb3; }
+
+.step.done .step-bar { background: #9fb6cf; }
+.step.done .step-label { color: #8a939c; }
+.step.current .step-bar { background: var(--rtm-primary); }
+.step.current .step-label { color: var(--rtm-text); }
+
+.panel {
+  padding: 16px 18px;
+  margin-bottom: 16px;
+  background: var(--rtm-card);
+  border: 1px solid #dfe4e9;
+  border-radius: 12px;
+}
+
+.panel-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+
+.panel-meta { font-size: 15px; color: var(--rtm-muted); }
+.reason-text { margin: 0; font-size: 17px; line-height: 1.5; }
+.reason-source { display: block; margin-top: 8px; font-size: 14px; color: #8a939c; }
+.reason-source button { font: inherit; color: var(--rtm-primary); background: none; border: none; padding: 0; cursor: pointer; text-decoration: underline; }
+
+/* Findings, inline. close() blocks on these three, so they belong here — beside
+   the rifle — rather than behind a link people only meet as an error. */
+.judgment {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.judgment-label { flex: none; width: 130px; font-size: 15px; font-weight: 600; color: #4a525a; }
+.judgment-opts { flex: 1; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 0 16px;
+  border-radius: 22px;
+  font-size: 15px;
+  font-weight: 600;
+  cursor: pointer;
+  user-select: none;
+  touch-action: manipulation;
+  background: var(--rtm-card);
+  border: 2px solid var(--rtm-border);
+  color: var(--rtm-text);
+}
+
+.pill input { position: absolute; opacity: 0; pointer-events: none; }
+.pill:has(input:checked) { background: var(--rtm-primary); border-color: var(--rtm-primary); color: #fff; }
+.pill:has(input:focus-visible) { outline: 3px solid var(--rtm-primary); outline-offset: 2px; }
+
+.judgment.unset .pill { background: #fdf3e3; border-color: #e3c58a; color: #7a4a00; }
+.judgment.unset .pill:has(input:checked) { background: var(--rtm-primary); border-color: var(--rtm-primary); color: #fff; }
+
+.judgment-more { display: inline; }
+.judgment-more > summary {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 0 14px;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--rtm-primary);
+  cursor: pointer;
+  list-style: none;
+}
+.judgment-more > summary::-webkit-details-marker { display: none; }
+.judgment-more[open] > summary { display: none; }
+.judgment-more .judgment-opts { display: inline-flex; }
+
+.judgment-required {
+  flex: none;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: #8a4500;
+}
+
+/* Work log — clock sessions, parts, and status changes as one story. */
+.log-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 9px 0;
+  border-top: 1px solid #eef1f4;
+}
+
+.log-when { flex: none; width: 116px; font-size: 14px; color: #8a939c; font-variant-numeric: tabular-nums; }
+.log-dot { flex: none; width: 8px; height: 8px; border-radius: 50%; background: #8a939c; }
+.log-row.tone-live .log-dot { background: var(--rtm-success); }
+.log-row.tone-labor .log-dot { background: var(--rtm-success); }
+.log-row.tone-part .log-dot { background: var(--rtm-primary); }
+.log-text { flex: 1; font-size: 16px; min-width: 0; }
+.log-amount { flex: none; font-size: 15px; font-weight: 600; color: #4a525a; font-variant-numeric: tabular-nums; }
+
+/* Removing a part line is not a decision worth a 56px red button on a tablet. */
+.log-remove {
+  flex: none;
+  min-width: 44px;
+  min-height: 44px;
+  font-size: 20px;
+  line-height: 1;
+  color: #8a939c;
+  background: none;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.log-remove:hover { color: var(--rtm-danger); background: #fceceb; }
+
+.btn-dashed {
+  display: inline-flex;
+  align-items: center;
+  min-height: 48px;
+  padding: 0 18px;
+  font-size: 15px;
+  font-weight: 600;
+  font-family: inherit;
+  color: var(--rtm-primary);
+  background: var(--rtm-card);
+  border: 1.5px dashed #b8c1c9;
+  border-radius: 9px;
+  cursor: pointer;
+}
+
+.btn-dashed:hover { background: #e8eff7; }
+
+.log-tools { display: flex; gap: 10px; flex-wrap: wrap; padding-top: 8px; }
+.log-tools > details { flex: 1 1 100%; }
+.log-tools > details > summary { list-style: none; display: inline-block; }
+.log-tools > details > summary::-webkit-details-marker { display: none; }
+.log-tools .part-form { margin-top: 12px; }
+
+/* One decision per page, in a dark bar, at the bottom. */
+.next-step {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 16px 18px;
+  margin-bottom: 16px;
+  background: #12161a;
+  border-radius: 12px;
+}
+
+.next-step-label { flex: 1; min-width: 160px; font-size: 16px; color: #c9d1d8; }
+.next-step form { display: contents; }
+
+.btn-next {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 56px;
+  padding: 0 26px;
+  font-size: 18px;
+  font-weight: 600;
+  font-family: inherit;
+  white-space: nowrap;
+  color: #fff;
+  background: #2f7fd4;
+  border: none;
+  border-radius: 10px;
+  cursor: pointer;
+  text-decoration: none;
+}
+
+.btn-next:hover { background: #2569b1; }
+
+.btn-next.quiet {
+  min-height: 56px;
+  padding: 0 20px;
+  font-size: 16px;
+  color: #e8edf1;
+  background: transparent;
+  border: 1.5px solid #4a525a;
+}
+
+.btn-next.quiet:hover { background: #1e252c; }
+
+/* Everything that is not the decision: available, quiet, collapsed. */
+.drawers { display: flex; gap: 10px; flex-wrap: wrap; }
+
+.drawer { flex: 1 1 220px; }
+
+.drawer > summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 48px;
+  padding: 0 16px;
+  font-size: 15px;
+  font-weight: 600;
+  color: #4a525a;
+  background: var(--rtm-card);
+  border: 1px solid #dfe4e9;
+  border-radius: 10px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.drawer > summary::-webkit-details-marker { display: none; }
+.drawer > summary:hover { background: #f6f8fa; }
+.drawer[open] > summary { border-radius: 10px 10px 0 0; }
+.drawer-hint { font-weight: 400; color: #8a939c; }
+
+.drawer-body {
+  padding: 14px 16px;
+  background: var(--rtm-card);
+  border: 1px solid #dfe4e9;
+  border-top: none;
+  border-radius: 0 0 10px 10px;
+}
+
+.drawer-body dl { margin: 0; }
+.drawer-body dt { font-size: 13px; color: var(--rtm-muted); }
+.drawer-body dd { margin: 0 0 8px; font-size: 15px; }
+.drawer-body ul { margin: 0; padding-left: 20px; font-size: 15px; }
+
+/* ---------- Narrow / portrait tablet ---------- */
+
+@media (max-width: 900px) {
+  .bench-layout { grid-template-columns: minmax(0, 1fr); }
+  .bench-row { flex-wrap: wrap; }
+  .bench-body { flex: 1 1 60%; }
+  .bench-actions { flex: 1 1 100%; justify-content: flex-end; }
+  .stepper { flex-wrap: wrap; }
+  .step { flex: 1 1 25%; }
+  .judgment-label { width: 100%; }
+}
+
+@media print {
+  .rtm-header { background: #fff; }
+  .next-step, .chips, .bench-actions, .log-remove, .btn-dashed { display: none !important; }
+  .drawer[open] > summary, .drawer > summary { display: none; }
+  .drawer-body { border: none; padding: 0; }
+}
+
+/* The dark bar's controls sit inline with its buttons; the form defaults in
+   .rtm-main above would stretch them to the full width of the bar. */
+.next-step input[type="text"],
+.next-step select {
+  width: auto;
+  flex: 0 1 220px;
+  min-height: 56px;
+  color: #e8edf1;
+  background: #2a3138;
+  border: 1.5px solid #4a525a;
+}
+
+.next-step input[type="text"]::placeholder { color: #8a939c; }
+
+.clocked-badge { text-decoration: none; }
+
+/* rows="3" plus the .rtm-main textarea floor made the findings box taller than
+   the pills above it. */
+#findings-text { min-height: 84px; }
+
+/* dt/dd pairs inside a panel read as label-over-value, not an indented list. */
+.panel dl { margin: 0; }
+.panel dt { font-size: 13px; font-weight: 600; letter-spacing: 0.02em; color: var(--rtm-muted); }
+.panel dd { margin: 2px 0 0; font-size: 16px; }

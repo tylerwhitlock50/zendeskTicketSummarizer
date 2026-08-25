@@ -263,8 +263,14 @@ def get_rtm(rtm_id: int) -> Optional[dict[str, Any]]:
     return rtm
 
 
-def list_open_rtms() -> list[dict[str, Any]]:
-    """All non-closed RTMs for the worklist, oldest first."""
+def list_open_rtms(tech_id: Optional[int] = None) -> list[dict[str, Any]]:
+    """All non-closed RTMs for the worklist, oldest first.
+
+    Each row also carries what the bench needs to say what to do next:
+    ``last_activity_at`` (the most recent status change, clock in/out, or part
+    added — how "untouched" a rifle is), who is on the clock right now, and
+    whether ``tech_id`` has ever worked this RTM.
+    """
     with _conn() as conn:
         return conn.execute(
             """
@@ -272,12 +278,56 @@ def list_open_rtms() -> list[dict[str, Any]]:
                    r.repeat_return, r.received_at, r.zendesk_ticket_id,
                    r.on_hold, r.hold_reason, r.shipped_at,
                    (SELECT count(*) FROM rtm.work_session s
-                     WHERE s.rtm_id = r.id AND s.ended_at IS NULL) AS open_sessions
+                     WHERE s.rtm_id = r.id AND s.ended_at IS NULL) AS open_sessions,
+                   (SELECT t.name FROM rtm.work_session s JOIN rtm.tech t ON t.id = s.tech_id
+                     WHERE s.rtm_id = r.id AND s.ended_at IS NULL
+                     ORDER BY s.started_at, s.id LIMIT 1) AS open_session_tech,
+                   (SELECT min(s.started_at) FROM rtm.work_session s
+                     WHERE s.rtm_id = r.id AND s.ended_at IS NULL) AS open_session_started_at,
+                   GREATEST(
+                       r.received_at,
+                       r.updated_at,
+                       COALESCE((SELECT max(e.changed_at) FROM rtm.status_event e
+                                  WHERE e.rtm_id = r.id), r.received_at),
+                       COALESCE((SELECT max(COALESCE(s.ended_at, s.started_at))
+                                   FROM rtm.work_session s
+                                  WHERE s.rtm_id = r.id), r.received_at),
+                       COALESCE((SELECT max(p.added_at) FROM rtm.part_line p
+                                  WHERE p.rtm_id = r.id), r.received_at)
+                   ) AS last_activity_at,
+                   EXISTS (SELECT 1 FROM rtm.work_session s
+                            WHERE s.rtm_id = r.id AND s.tech_id = %s) AS mine
               FROM rtm.rtm r
              WHERE r.status <> 'closed'
              ORDER BY r.received_at, r.id
+            """,
+            (tech_id,),
+        ).fetchall()
+
+
+def list_open_sessions() -> list[dict[str, Any]]:
+    """Every tech on the clock right now, with the rifle they are on."""
+    with _conn() as conn:
+        return conn.execute(
+            """
+            SELECT s.id, s.tech_id, t.name AS tech_name, s.started_at,
+                   s.rtm_id, r.rtm_number, r.serial_no,
+                   EXTRACT(EPOCH FROM (now() - s.started_at)) / 3600.0 AS hours
+              FROM rtm.work_session s
+              JOIN rtm.tech t ON t.id = s.tech_id
+              JOIN rtm.rtm r ON r.id = s.rtm_id
+             WHERE s.ended_at IS NULL
+             ORDER BY s.started_at, s.id
             """
         ).fetchall()
+
+
+def get_tech(tech_id: int) -> Optional[dict[str, Any]]:
+    """One active tech by id, or None. Used to validate the station identity."""
+    with _conn() as conn:
+        return conn.execute(
+            "SELECT id, name FROM rtm.tech WHERE id = %s AND active", (tech_id,)
+        ).fetchone()
 
 
 def history_for_serial(serial_no: str) -> list[dict[str, Any]]:
