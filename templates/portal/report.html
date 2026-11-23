@@ -71,6 +71,37 @@
   </div>
 </div>
 
+{% set acc = data.accuracy %}
+<div class="report-counts">
+  <div class="count-card">
+    <h2>Accuracy tests</h2>
+    <table>
+      <tr><td>Tested</td><td>{{ acc.tested }}</td></tr>
+      <tr><td>Passed</td><td>{{ acc.passed }}</td></tr>
+      <tr><td>Failed</td><td>{{ acc.failed }}</td></tr>
+      <tr><td>Not required</td><td>{{ acc.not_required }}</td></tr>
+      {% if acc.avg_moa is not none %}<tr><td>Average passing group</td><td>{{ '%.2f'|format(acc.avg_moa|float) }} MOA</td></tr>{% endif %}
+      {% if acc.avg_in is not none %}<tr><td>Average passing group</td><td>{{ '%.2f'|format(acc.avg_in|float) }}"</td></tr>{% endif %}
+    </table>
+  </div>
+  <div class="count-card">
+    <h2>Inspection points with issues</h2>
+    <table>
+      {% for r in data.point_issues %}<tr><td>{{ r.label }}</td><td>{{ r.n }}</td></tr>
+      {% else %}<tr><td class="empty">No issues marked in this period.</td></tr>{% endfor %}
+    </table>
+  </div>
+  <div class="count-card">
+    <h2>Quality checks</h2>
+    <table>
+      <tr><td>Matched the complaint</td><td>{{ data.complaint.get('yes', 0) }}</td></tr>
+      <tr><td>Partly matched</td><td>{{ data.complaint.get('partly', 0) }}</td></tr>
+      <tr><td>Did not match</td><td>{{ data.complaint.get('no', 0) }}</td></tr>
+      <tr><td>Arrived damaged</td><td>{{ data.arrivals.damaged }} of {{ data.arrivals.received }}</td></tr>
+    </table>
+  </div>
+</div>
+
 <h2 class="section-head">By person</h2>
 <table class="report-table">
   <thead>
@@ -88,7 +119,7 @@
       <td><strong>{{ counts.total }}</strong></td>
     </tr>
     {% else %}
-    <tr><td colspan="8" class="empty">No activity in this period.</td></tr>
+    <tr><td colspan="9" class="empty">No activity in this period.</td></tr>
     {% endfor %}
   </tbody>
 </table>

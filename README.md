@@ -103,6 +103,21 @@ $env:DEMO_DATABASE_URL = "postgresql://postgres:portal_dev@localhost:5433/portal
 venv\Scripts\python tests\demo_server.py   # http://localhost:5055
 ```
 
+To show it to people from a server (for example a throwaway droplet), use
+`run_demo.sh`. It asks for a password that every visitor must enter, turns
+on the firewall (SSH and the demo port only) and fail2ban, and starts the demo
+with its own throwaway database (not published to the internet; your real
+`.env` is never read):
+
+```bash
+sudo ./run_demo.sh          # start (port 80; DEMO_PUBLIC_PORT=8080 to change)
+sudo ./run_demo.sh logs     # follow the log
+sudo ./run_demo.sh stop     # stop and delete the demo database
+```
+
+The password travels over plain HTTP, which is fine for a short demo; use
+HTTPS for anything longer.
+
 ## Deploy with Docker
 
 With a filled-in `.env` next to `docker-compose.yml`:
