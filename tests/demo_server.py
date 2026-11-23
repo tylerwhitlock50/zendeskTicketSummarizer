@@ -85,4 +85,4 @@ if not repair_db.list_techs(include_inactive=True):
     repair_db.create_tech("Demo Tech", "1234")
 
 if __name__ == "__main__":
-    app_module.app.run(port=5055, debug=False)
+    app_module.app.run(port=int(os.environ.get("PORT", 5055)), debug=False)

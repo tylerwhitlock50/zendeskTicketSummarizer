@@ -4,6 +4,10 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>{% block title %}Repair portal{% endblock %}</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Barlow+Semi+Condensed:wght@500;600&family=Barlow:wght@400;500;600;700&display=swap">
+  <link rel="stylesheet" href="{{ url_for('static', filename='theme.css') }}">
   <link rel="stylesheet" href="{{ url_for('static', filename='print.css') }}">
   <link rel="stylesheet" href="{{ url_for('static', filename='portal.css') }}">
 </head>
@@ -11,17 +15,18 @@
   {% set tech = current_tech() %}
   <nav class="portal-nav no-print">
     <a href="{{ url_for('portal.queue') }}" class="brand">Repair portal</a>
+    {% set ep = request.endpoint or '' %}
     <span class="nav-links">
-      <a href="{{ url_for('portal.queue') }}">Queue</a>
-      <a href="{{ url_for('portal.incoming') }}">Incoming</a>
-      <a href="{{ url_for('portal.scan') }}">Scan</a>
-      <a href="{{ url_for('report.weekly') }}">Report</a>
-      <a href="{{ url_for('admin.settings') }}">Settings</a>
-      <a href="{{ url_for('index') }}">Ticket print</a>
+      <a href="{{ url_for('portal.queue') }}" class="{{ 'active' if ep == 'portal.queue' }}">Queue</a>
+      <a href="{{ url_for('portal.incoming') }}" class="{{ 'active' if ep == 'portal.incoming' }}">Incoming</a>
+      <a href="{{ url_for('portal.scan') }}" class="{{ 'active' if ep in ('portal.scan', 'portal.action_page') }}">Scan</a>
+      <a href="{{ url_for('report.weekly') }}" class="{{ 'active' if ep.startswith('report.') }}">Report</a>
+      <a href="{{ url_for('admin.settings') }}" class="{{ 'active' if ep.startswith('admin.') }}">Settings</a>
+      <a href="{{ url_for('index') }}" class="nav-aside">Ticket print</a>
     </span>
     <span class="nav-tech">
       {% if tech %}
-        <span class="tech-badge">{{ tech.name }}</span>
+        <span class="tech-badge" data-initial="{{ (tech.name or '?')[:1]|upper }}">{{ tech.name }}</span>
         <form method="post" action="{{ url_for('portal.tech_signout') }}" class="inline-form">
           {{ csrf_field() }}<button type="submit" class="link-btn">Sign out</button>
         </form>

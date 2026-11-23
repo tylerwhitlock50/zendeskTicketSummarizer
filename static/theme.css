@@ -1,0 +1,41 @@
+/*
+  Christensen Arms field-tool theme — shared with the Rep Portal and the
+  Supplier Portal so the three apps read as one family.
+
+  Fonts: Barlow (body), Barlow Condensed (titles, numbers), Barlow Semi
+  Condensed (eyebrows, buttons, nav). Loaded from Google Fonts in each page's
+  <head>; the fallbacks keep things usable offline.
+
+  Rules carried over from the Rep Portal design notes:
+    - light surfaces, high contrast
+    - one green (brand) button per view; everything else is outline or link
+    - square corners on structure, 2px on controls, nothing pill-shaped
+    - ember means late / needs attention, never decoration
+    - 4px spacing grid; controls are 44-48px tall
+*/
+
+:root {
+  --font-body: "Barlow", "Segoe UI", system-ui, -apple-system, sans-serif;
+  --font-display: "Barlow Condensed", "Arial Narrow", "Segoe UI", sans-serif;
+  --font-label: "Barlow Semi Condensed", "Barlow", "Segoe UI", sans-serif;
+
+  --ink: #12130F;          /* body, headers, nav bar */
+  --ink-2: #3A3D35;        /* secondary text */
+  --muted: #6E6A61;        /* eyebrows, meta */
+  --muted-2: #5F5C54;      /* field labels */
+  --faint: #8E8A80;        /* hints, placeholders */
+  --brand: #1F3A2E;        /* Field Green — the one CTA */
+  --brand-hover: #274A3A;
+  --brand-tint: #E6EBE5;
+  --accent: #C9662A;       /* Ember — overdue, alerts */
+  --accent-ink: #20100A;
+  --accent-tint: #F7E9DF;
+  --danger: #8E1F14;
+  --canvas: #F4F2ED;       /* Bone — app background */
+  --surface: #FFFFFF;
+  --line: #DFDBD2;
+  --line-strong: #C6C2B8;
+  --track: #E6E3DC;
+
+  --radius: 2px;
+}
