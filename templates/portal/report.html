@@ -1,0 +1,47 @@
+{% extends "portal/base.html" %}
+{% block title %}Portal tag report{% endblock %}
+{% block content %}
+<h1>Portal tag report</h1>
+<p class="tagline">Live from Zendesk: every ticket tagged <code>{{ base_tag }}</code> ({{ total }} total).</p>
+
+<div class="report-counts">
+  <div class="count-card">
+    <h2>By ticket status</h2>
+    <table>
+      {% for status, n in status_counts.items() %}
+      <tr><td><span class="badge status-{{ status }}">{{ status|capitalize }}</span></td><td>{{ n }}</td></tr>
+      {% endfor %}
+    </table>
+  </div>
+  <div class="count-card">
+    <h2>By last action</h2>
+    <table>
+      {% for label, n in tag_counts %}
+      <tr><td>{{ label }}</td><td>{{ n }}</td></tr>
+      {% else %}
+      <tr><td class="empty">No action tags yet.</td><td></td></tr>
+      {% endfor %}
+    </table>
+  </div>
+</div>
+
+<table class="report-table">
+  <thead>
+    <tr><th>Ticket</th><th>Subject</th><th>Status</th><th>Portal actions</th><th>Updated</th></tr>
+  </thead>
+  <tbody>
+    {% for row in rows %}
+    <tr>
+      <td><a href="{{ url_for('portal.action_page', ticket_id=row.id) }}">#{{ row.id }}</a>
+          <a class="subtle" href="{{ row.agent_url }}" target="_blank" rel="noopener">ZD</a></td>
+      <td>{{ row.subject or '(no subject)' }}</td>
+      <td><span class="badge status-{{ row.status }}">{{ (row.status or '?')|capitalize }}</span></td>
+      <td>{{ row.portal_tags|join(', ') }}</td>
+      <td>{{ row.updated_at|datefmt }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="5" class="empty">No tickets carry the {{ base_tag }} tag yet.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

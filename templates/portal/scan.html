@@ -1,0 +1,15 @@
+{% extends "portal/base.html" %}
+{% block title %}Scan a ticket{% endblock %}
+{% block content %}
+<div class="scan-card">
+  <h1>Scan a ticket</h1>
+  <p class="tagline">Scan the barcode on the one-pager, or type the ticket number.</p>
+  {% if error %}<div class="notice warn">{{ error }}</div>{% endif %}
+  <form action="{{ url_for('portal.scan_go') }}" method="get" class="lookup-form">
+    <input type="text" name="ticket_id" placeholder="Ticket ID" autofocus autocomplete="off"
+           inputmode="numeric" required>
+    <button type="submit">Open</button>
+  </form>
+  <p class="hint">Handheld scanners press Enter automatically after a scan — just scan and go.</p>
+</div>
+{% endblock %}

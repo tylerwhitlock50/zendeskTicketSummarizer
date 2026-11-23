@@ -28,6 +28,13 @@
         {% if ticket.via and ticket.via.channel %} &middot; via {{ ticket.via.channel }}{% endif %}
         {% if form %} &middot; Form: {{ form.display_name or form.name }}{% endif %}
       </div>
+      <div class="barcode-strip">
+        <div class="barcode-code128" title="Scan to log an action">{{ barcode_svg|safe }}</div>
+        <div class="barcode-qr">
+          {{ qr_svg|safe }}
+          <span class="barcode-hint">Scan to open the action portal</span>
+        </div>
+      </div>
     </header>
 
     <section class="panel">

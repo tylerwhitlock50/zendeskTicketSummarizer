@@ -1,4 +1,8 @@
-"""Apply migrations/NNN_*.sql to the RTM Postgres database, in order, once each."""
+"""Apply migrations/NNN_*.sql to the Postgres database, in order, once each.
+
+Migration history lives in rtm.schema_migrations (kept under the legacy schema
+name so databases that ran the old RTM tracker migrations keep working).
+"""
 
 import os
 import sys
@@ -17,9 +21,9 @@ MIGRATIONS_DIR = Path(__file__).resolve().parent
 
 
 def main() -> int:
-    dsn = os.environ.get("RTM_DATABASE_URL")
+    dsn = os.environ.get("DATABASE_URL") or os.environ.get("RTM_DATABASE_URL")
     if not dsn:
-        print("RTM_DATABASE_URL is not set", file=sys.stderr)
+        print("DATABASE_URL is not set", file=sys.stderr)
         return 1
 
     with psycopg.connect(dsn) as conn:

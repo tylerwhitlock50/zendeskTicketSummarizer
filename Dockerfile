@@ -5,7 +5,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt gunicorn
 
-COPY app.py zendesk_client.py summarizer.py visual_client.py rtm_db.py rtm_views.py rtm_reports.py ./
+COPY app.py zendesk_client.py summarizer.py barcodes.py db.py portal_views.py ./
 COPY templates/ templates/
 COPY static/ static/
 COPY migrations/ migrations/

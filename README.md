@@ -1,9 +1,20 @@
-# Zendesk Ticket Print
+# Zendesk Ticket Print + Scan Portal
 
-A small Flask app that looks up a Zendesk ticket, pulls the full conversation and
-custom field data, summarizes it with OpenAI, and renders a printable one-page
-sheet with the issue summary, customer information, ticket ID, and product
-information.
+A small Flask app for the repair shop, with Zendesk as the system of record:
+
+1. **One-pager** — look up a Zendesk ticket, pull the conversation and custom
+   fields, summarize with OpenAI, and print a one-page sheet for the physical
+   file. The sheet carries a **Code 128 barcode** (the bare ticket ID, for
+   handheld scanners) and a **QR code** (opens the scan portal on a phone).
+2. **Scan portal** — scan the barcode to open the ticket and press a quick
+   action: each button posts a configurable **public comment** to the Zendesk
+   ticket ("your firearm has arrived", "being worked on", …) and tags the
+   ticket. A free-form note (internal or public) is also available.
+3. **Tag report** — every portal touch adds a base tag (default
+   `repair-portal`) plus a per-action tag (`rp-arrived`, `rp-in-work`, …), so
+   `/report` can pull live from Zendesk and show where tagged tickets stand.
+
+Workflow state (statuses, queues, assignments) lives in Zendesk, not here.
 
 ## Setup
 
@@ -13,15 +24,30 @@ venv\Scripts\pip install -r requirements.txt
 copy .env.example .env   # then fill in your credentials
 ```
 
-Required values in `.env`:
+Values in `.env`:
 
 | Variable | Description |
 |---|---|
 | `ZENDESK_SUBDOMAIN` | `yourcompany` for `https://yourcompany.zendesk.com` |
 | `ZENDESK_EMAIL` | Email of the agent/admin the API token belongs to |
 | `ZENDESK_API_TOKEN` | Admin Center → Apps and integrations → APIs → Zendesk API |
-| `OPENAI_API_KEY` | OpenAI API key |
+| `OPENAI_API_KEY` | OpenAI API key (for the one-pager summary) |
 | `OPENAI_MODEL` | Optional, defaults to `gpt-4o-mini` |
+| `DATABASE_URL` | Postgres for the portal's quick-action config + audit log. Unset → one-pager only. (`RTM_DATABASE_URL` still works as a legacy name.) |
+| `PORTAL_BASE_URL` | Absolute URL of this app as reachable from a phone (for the printed QR code). Unset → the request host is used. |
+| `PORTAL_TAG` | Base tag added on every portal touch, default `repair-portal` |
+| `FLASK_SECRET_KEY` | Random string in production (sessions + flash messages) |
+
+With `DATABASE_URL` set, create the tables (also run automatically on container
+start):
+
+```powershell
+venv\Scripts\python migrations\migrate.py
+```
+
+The portal seeds four starter actions (Arrived / Being worked on / Being tested
+/ Awaiting processing). Edit them — labels, customer-facing comment text, tags,
+order — at **`/admin/actions`**; no deploy needed.
 
 ## Run
 
@@ -29,8 +55,16 @@ Required values in `.env`:
 venv\Scripts\python app.py
 ```
 
-Open http://localhost:5000, enter a ticket ID (or paste a ticket URL), and use
-**Print / Save as PDF** on the sheet.
+- http://localhost:5000 — ticket lookup → printable sheet (**Print / Save as PDF**)
+- http://localhost:5000/scan — scan station (scanner types the ID + Enter)
+- http://localhost:5000/t/&lt;ticket_id&gt; — action page (what the QR opens)
+- http://localhost:5000/report — live tag report from Zendesk
+- http://localhost:5000/admin/actions — quick-action settings
+
+Comments post as the Zendesk user who owns the API token. The portal records
+optional tech initials in its local audit log only — they never appear in the
+customer-facing comment. Note: `/admin/actions` has no login; keep the app on
+the shop LAN or add auth before exposing it.
 
 ## Deploy with Docker
 
@@ -40,79 +74,28 @@ With a filled-in `.env` next to `docker-compose.yml`:
 docker compose up -d --build
 ```
 
-The app is served by gunicorn on port 5000 (change the host port in
-`docker-compose.yml` if it clashes). The container restarts automatically
-unless stopped, and a healthcheck pings the index page every 30 seconds.
-
-Manage it with the usual commands:
-
-```bash
-docker compose logs -f      # tail logs
-docker compose restart      # restart after editing .env
-docker compose pull; docker compose up -d --build   # redeploy after code changes
-docker compose down         # stop and remove
-```
-
-The `.env` file is not baked into the image — compose injects it at runtime,
-so credential changes only need a restart, not a rebuild.
-
-## How it works
-
-- `zendesk_client.py` calls the Zendesk API: the ticket (with sideloaded
-  requester + organization), all comments (paginated, with sideloaded authors),
-  the ticket field definitions (to translate custom field IDs/tags into
-  human-readable names via `custom_field_options`), and the ticket form (for
-  field ordering). Field definitions are cached for 10 minutes.
-- `summarizer.py` builds a plain-text transcript of the conversation (middle
-  truncated past ~12k chars) and asks OpenAI (JSON mode) for an issue summary,
-  key points, current status, and product context. If the OpenAI call fails,
-  the sheet still renders with a notice.
-- `app.py` orchestrates the calls and renders `templates/ticket_sheet.html`,
-  styled by `static/print.css` for US Letter printing.
-
-## RTM Tracker
-
-The app also hosts an RTM (rifle return / RMA) tracker at **`/rtm/`** — designed
-for shop-floor tablets. It covers intake (with serial lookup against Infor
-VISUAL), status workflow (received → in_inspection → in_repair → qc_test →
-shipped → closed), tech clock-in/clock-out labor tracking, part lines costed
-from VISUAL, inspection findings (root cause / responsibility / resolution),
-Zendesk ticket linking with AI-drafted return reasons, and monthly reports at
-`/rtm/reports` (HTML) and `/rtm/reports.csv`.
-
-Data lives in Postgres (schema `rtm`); timestamps are stored UTC and rendered
-in America/Denver. **Infor VISUAL access is read-only** — the app only queries
-serial, part, and shipment data; it never writes to VISUAL.
-
-### RTM environment variables
-
-| Variable | Description |
-|---|---|
-| `VISUAL_DB_HOST` | Infor VISUAL SQL Server host |
-| `VISUAL_DB_PORT` | SQL Server port (default `1433`) |
-| `VISUAL_DB_USER` / `VISUAL_DB_PASSWORD` | Read-only SQL Server credentials |
-| `VISUAL_DB_NAME` | VISUAL database name (default `VECA`) |
-| `VISUAL_SITE_ID` | Site id used to scope VISUAL queries |
-| `RTM_DATABASE_URL` | Postgres DSN, e.g. `postgresql://user:pass@host:25060/db?sslmode=require`. If unset, the ticket-print app still works and RTM routes are disabled. |
-| `FLASK_SECRET_KEY` | Random string for Flask sessions (flash messages) |
-
-### Dev run (local Postgres via compose overlay)
+Dev overlay with a local Postgres (port 5433):
 
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
 ```
 
-This adds a `postgres:16` container (host port 5433, database `rtm_dev`,
-password `rtm_dev`) and points the app at it. On container start,
-`entrypoint.sh` runs `python migrations/migrate.py` whenever `RTM_DATABASE_URL`
-is set, then starts gunicorn. In production (plain `docker compose up`), set
-`RTM_DATABASE_URL` in `.env` to your managed Postgres (e.g. DigitalOcean) —
-migrations run automatically the same way.
+The app is served by gunicorn on port 5000; migrations run on container start.
+The `.env` file is injected at runtime by compose — credential changes only
+need `docker compose restart`, not a rebuild.
 
-To run migrations by hand outside Docker:
+## Tests
 
 ```powershell
-venv\Scripts\python migrations\migrate.py
+venv\Scripts\python -m pytest tests\
 ```
 
-On the shop floor, open `http://<server>:5000/rtm/` on a tablet.
+Zendesk and the database are faked; no network or Postgres needed.
+
+## History
+
+This app previously contained a full RTM (return-to-manufacturer) workflow
+tracker (worklist, status board, intake, labor clocking, parts, reports). It
+was removed in favor of letting Zendesk manage workflow — see git history
+(branch `rtm-tracker` era) if you ever need it. Migrations `001`–`003` are kept
+so existing databases stay consistent; the old `rtm` schema is left untouched.

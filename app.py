@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from dotenv import load_dotenv
 from flask import Flask, redirect, render_template, request, url_for
 
+import barcodes
 from summarizer import build_transcript, summarize_ticket
 from zendesk_client import ZendeskClient, ZendeskError, resolve_custom_fields
 
@@ -19,21 +20,19 @@ app = Flask(__name__)
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", "dev-secret-change-me")  # flash() needs it
 _client = None
 
-# RTM tracker (blueprints + Postgres pool). The ticket-print routes above must
-# keep working even if the RTM database is not configured.
-import rtm_db
-from rtm_views import rtm_bp
-from rtm_reports import reports_bp
+# Scan portal (quick actions + admin + report). The ticket-print routes must
+# keep working even if the portal database is not configured.
+import db
+from portal_views import portal_bp
 
-app.register_blueprint(rtm_bp)
-app.register_blueprint(reports_bp)
+app.register_blueprint(portal_bp)
 
-_rtm_dsn = os.environ.get("RTM_DATABASE_URL", "")
-if _rtm_dsn:
-    rtm_db.init_pool(_rtm_dsn)
+_dsn = os.environ.get("DATABASE_URL", "") or os.environ.get("RTM_DATABASE_URL", "")
+if _dsn:
+    db.init_pool(_dsn)
 else:
     logging.getLogger(__name__).warning(
-        "RTM_DATABASE_URL is not set; RTM tracker routes will be unavailable."
+        "DATABASE_URL is not set; the scan portal's quick actions will be unavailable."
     )
 
 
@@ -104,8 +103,15 @@ def ticket_sheet(ticket_id):
     except Exception as exc:  # render the sheet even if OpenAI fails
         summary_error = f"AI summary unavailable: {exc}"
 
+    portal_url = url_for("portal.action_page", ticket_id=ticket_id, _external=True)
+    base = os.environ.get("PORTAL_BASE_URL", "").rstrip("/")
+    if base:  # printed QR should point at the deployed portal, not the dev host
+        portal_url = f"{base}/t/{ticket_id}"
+
     return render_template(
         "ticket_sheet.html",
+        barcode_svg=barcodes.code128_svg(ticket_id),
+        qr_svg=barcodes.qr_svg(portal_url),
         ticket=ticket,
         requester=requester,
         organization=organization,

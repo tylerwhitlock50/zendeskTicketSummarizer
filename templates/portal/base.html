@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{% block title %}Repair portal{% endblock %}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='print.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='portal.css') }}">
+</head>
+<body class="portal-page">
+  <nav class="portal-nav no-print">
+    <a href="{{ url_for('portal.scan') }}" class="brand">Repair portal</a>
+    <span class="nav-links">
+      <a href="{{ url_for('portal.scan') }}">Scan</a>
+      <a href="{{ url_for('portal.report') }}">Report</a>
+      <a href="{{ url_for('portal.admin_actions') }}">Settings</a>
+      <a href="{{ url_for('index') }}">Ticket print</a>
+    </span>
+  </nav>
+  <main class="portal-main">
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% for category, message in messages %}
+        <div class="notice {{ 'warn' if category == 'error' else 'ok' }}">{{ message }}</div>
+      {% endfor %}
+    {% endwith %}
+    {% block content %}{% endblock %}
+  </main>
+</body>
+</html>
