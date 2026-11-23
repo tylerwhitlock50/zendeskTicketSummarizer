@@ -97,7 +97,8 @@
           {% if done_at %}<span class="stage-done">done {{ done_at|localtime }}{% if stage_by.get(stage.key) %} by {{ stage_by[stage.key]|initials }}{% endif %}</span>{% endif %}
         </summary>
         <form method="post" enctype="multipart/form-data"
-              action="{{ url_for('portal.post_stage', ticket_id=ticket.id, key=stage.key) }}" class="stage-form">
+              action="{{ url_for('portal.post_stage', ticket_id=ticket.id, key=stage.key) }}" class="stage-form"
+              data-preview="{{ url_for('portal.preview_stage', ticket_id=ticket.id, key=stage.key) }}">
           {{ csrf_field() }}
 
           {% if stage.key == 'received' %}
@@ -220,7 +221,8 @@
       </form>
       {% endif %}
     </h2>
-    <form method="post" enctype="multipart/form-data" action="{{ url_for('portal.post_action', ticket_id=ticket.id) }}" class="note-form">
+    <form method="post" enctype="multipart/form-data" action="{{ url_for('portal.post_action', ticket_id=ticket.id) }}" class="note-form"
+        data-preview="{{ url_for('portal.preview_action', ticket_id=ticket.id) }}">
       {{ csrf_field() }}
       {% if actions %}
       <div class="action-grid">
@@ -316,7 +318,113 @@
   </section>
   {% endif %}
 {% endif %}
+<dialog class="send-confirm" id="send-confirm" aria-labelledby="send-confirm-title"
+        data-to-name="{{ requester.name if requester and requester.name else '' }}"
+        data-to-email="{{ requester.email if requester and requester.email else '' }}"
+        data-subject="{{ ticket.subject or '' }}">
+  <div class="send-confirm-inner">
+    <header><h2 id="send-confirm-title">Check before sending</h2></header>
+    <div class="confirm-body" id="send-confirm-body"></div>
+    <footer>
+      <button type="button" class="secondary-btn" data-confirm-cancel>Cancel, keep editing</button>
+      <button type="button" class="primary-btn" data-confirm-ok>Approve and send</button>
+    </footer>
+  </div>
+</dialog>
 <script>
+  // Confirm before sending: every stage, update button and note first shows
+  // exactly what will be posted (built by the server, so it matches), and is
+  // only sent once the tech taps Approve.
+  (function () {
+    var dialog = document.getElementById("send-confirm");
+    if (!dialog || !dialog.showModal) return;
+    var bodyBox = document.getElementById("send-confirm-body");
+    var okBtn = dialog.querySelector("[data-confirm-ok]");
+    var pending = null;  // {form, submitter}
+
+    function el(tag, cls, text) {
+      var n = document.createElement(tag);
+      if (cls) n.className = cls;
+      if (text != null) n.textContent = text;
+      return n;
+    }
+    // Plain text with line breaks kept and web links clickable, as in the email.
+    function textWithLinks(box, text) {
+      var re = /https?:\/\/[^\s<>"]+/g, last = 0, m;
+      while ((m = re.exec(text))) {
+        box.appendChild(document.createTextNode(text.slice(last, m.index)));
+        var a = el("a", null, m[0]); a.href = m[0]; a.target = "_blank"; a.rel = "noopener noreferrer";
+        box.appendChild(a); last = m.index + m[0].length;
+      }
+      box.appendChild(document.createTextNode(text.slice(last)));
+    }
+    function card(post, count, i) {
+      var c = el("div", "email-card " + (post.public ? "public" : "internal"));
+      var kind = post.public ? "Email to the customer" : "Internal note: staff only, the customer is not emailed";
+      if (count > 1) kind = "Post " + (i + 1) + " of " + count + ": " + kind;
+      c.appendChild(el("div", "email-kind", kind));
+      if (post.public) {
+        var meta = el("dl", "email-meta"), name = dialog.dataset.toName, email = dialog.dataset.toEmail;
+        meta.appendChild(el("dt", null, "To"));
+        meta.appendChild(el("dd", null, (name && email) ? name + " <" + email + ">" : (name || email || "The ticket's requester")));
+        meta.appendChild(el("dt", null, "Subject"));
+        meta.appendChild(el("dd", null, "Re: " + (dialog.dataset.subject || "your ticket")));
+        c.appendChild(meta);
+      }
+      var t = el("div", "email-text"); textWithLinks(t, post.body); c.appendChild(t);
+      if (post.files && post.files.length) {
+        var f = el("div", "email-files");
+        post.files.forEach(function (name) { f.appendChild(el("span", null, "📎 " + name)); });
+        c.appendChild(f);
+      }
+      return c;
+    }
+    function show(data) {
+      bodyBox.innerHTML = "";
+      document.getElementById("send-confirm-title").textContent = data.ok ? "Check before sending: " + data.title : "Can't send yet";
+      if (!data.ok) {
+        bodyBox.appendChild(el("p", "confirm-error", data.error || "Something went wrong."));
+        okBtn.hidden = true;
+      } else {
+        var anyPublic = data.posts.some(function (p) { return p.public; });
+        if (data.summary) bodyBox.appendChild(el("p", null, data.summary));
+        data.posts.forEach(function (p, i) { bodyBox.appendChild(card(p, data.posts.length, i)); });
+        okBtn.hidden = false;
+        okBtn.textContent = anyPublic ? "Approve and send to customer" : (data.posts.length ? "Approve and post internal note" : "Approve and save");
+      }
+      dialog.showModal();
+      (data.ok ? okBtn : dialog.querySelector("[data-confirm-cancel]")).focus();
+    }
+
+    document.querySelectorAll("form[data-preview]").forEach(function (form) {
+      form.addEventListener("submit", function (e) {
+        if (form.dataset.approved === "1") { form.dataset.approved = ""; return; }  // send it
+        e.preventDefault();
+        var submitter = e.submitter || null;
+        var fd = new FormData(form);
+        if (submitter && submitter.name) fd.set(submitter.name, submitter.value);
+        fd.delete("files");  // the preview needs only the file names, not the photos
+        form.querySelectorAll("input[type=file]").forEach(function (inp) {
+          Array.prototype.forEach.call(inp.files, function (f) { fd.append("file_names", f.name); });
+        });
+        pending = { form: form, submitter: submitter };
+        fetch(form.dataset.preview, { method: "POST", body: fd, credentials: "same-origin" })
+          .then(function (r) { return r.json(); })
+          .catch(function () { return { ok: false, error: "Couldn't build the preview (the portal didn't answer). Nothing was sent; try again." }; })
+          .then(show);
+      });
+    });
+    okBtn.addEventListener("click", function () {
+      if (!pending) return;
+      var p = pending; pending = null;
+      dialog.close();
+      p.form.dataset.approved = "1";
+      if (p.form.requestSubmit) p.form.requestSubmit(p.submitter || undefined);
+      else { if (p.submitter && p.submitter.name) { var h = document.createElement("input"); h.type = "hidden"; h.name = p.submitter.name; h.value = p.submitter.value; p.form.appendChild(h); } p.form.submit(); }
+    });
+    dialog.querySelector("[data-confirm-cancel]").addEventListener("click", function () { pending = null; dialog.close(); });
+    dialog.addEventListener("close", function () { pending = null; });
+  })();
   // Inspection: one tap marks every unanswered point OK (techs still change the ones with issues).
   document.querySelectorAll("[data-fill-ok]").forEach(function (btn) {
     btn.addEventListener("click", function () {

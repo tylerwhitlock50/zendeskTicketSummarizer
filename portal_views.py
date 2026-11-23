@@ -488,6 +488,113 @@ def _with_video(body, video):
     return f"{body}\n\nVideo: {video}" if video else body
 
 
+class _Stop(Exception):
+    """A stage or update can't be posted; the message says why."""
+
+
+def _read_attachments(form):
+    """Uploaded files and the video link, or raise _Stop."""
+    uploads, upload_error = files.read_uploads(request.files.getlist("files"))
+    video = files.clean_video_url(form.get("video_url"))
+    if upload_error or video is False:
+        raise _Stop(upload_error or "That video link doesn't look like a web address (https://…).")
+    return uploads, video
+
+
+def _preview_attachments(form):
+    """The preview is sent without the files themselves, only their names."""
+    names = [n.strip() for n in form.getlist("file_names") if n.strip()]
+    if len(names) > files.MAX_FILES:
+        raise _Stop(f"Attach at most {files.MAX_FILES} files at a time.")
+    for name in names:
+        ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""
+        if ext not in files.ALLOWED:
+            raise _Stop(f"“{name}” isn't a supported file type (photos, PDF or Excel).")
+    video = files.clean_video_url(form.get("video_url"))
+    if video is False:
+        raise _Stop("That video link doesn't look like a web address (https://…).")
+    return names, video
+
+
+def _plan_stage(ticket_id, key, form, tech, has_files, video):
+    """Work out exactly what a stage button would post, without posting it.
+
+    The real post and its confirm pop-up both use this, so the pop-up shows the
+    very message the customer gets. Raises _Stop with a message for the tech.
+    """
+    stage = repair_db.get_stage(key)
+    if stage is None:
+        raise _Stop("Unknown stage.")
+    rma = repair_db.get_rma(ticket_id)
+    if rma is None:
+        raise _Stop("Add this ticket to the repair queue first.")
+
+    moving_back = repair_db.stage_index(key) < repair_db.stage_index(rma["stage"])
+    if moving_back and form.get("move_back") != "1":
+        raise _Stop(
+            f"This RMA is already past “{stage['label']}”. Tick “Move back to this stage” "
+            "if you really mean to go back (the customer is emailed again)."
+        )
+    record_only = form.get("record_only") == "1"
+
+    parsed = _read_stage_form(key, form, rma)
+    if isinstance(parsed, str):
+        raise _Stop(parsed)
+    fields, values, mode, internal = parsed
+    values = {**_base_values(rma), **values}
+
+    if record_only:
+        # Only for tickets Zendesk has closed (no comments allowed): keep the
+        # repair record moving and tell CS to contact the customer another way.
+        if has_files or video:
+            raise _Stop("Zendesk won't take files on a closed ticket. Save the stage without them.")
+        try:
+            ticket, _req, _org = _get_zendesk().get_ticket(ticket_id)
+        except ZendeskError as exc:
+            raise _Stop(f"Could not read ticket #{ticket_id} from Zendesk: {exc}") from exc
+        if ticket.get("status") != "closed":
+            raise _Stop("This ticket is open in Zendesk, so post the stage normally.")
+        mode = "none"
+
+    if mode == "public":
+        body = _with_video(render_message(stage["comment_body"], values), video)
+    elif mode == "internal":
+        body = _with_video(internal, video)
+    elif has_files or video:  # nothing to tell the customer, but keep the files on the ticket
+        mode, body = "internal", _with_video(f"{stage['label']}: recorded by {tech['name']}.", video)
+    else:
+        body = None
+    return {"stage": stage, "rma": rma, "fields": fields, "mode": mode, "body": body, "record_only": record_only}
+
+
+def _preview_guard():
+    """Error response for a preview request that can't run, else None."""
+    if not db.available():
+        return {"ok": False, "error": "Database not configured."}, 503
+    if auth.current_tech() is None:
+        return {"ok": False, "error": "Sign in with your name and PIN first."}, 403
+    return None
+
+
+@portal_bp.route("/t/<int:ticket_id>/stage/<key>/preview", methods=["POST"])
+def preview_stage(ticket_id, key):
+    """What a stage button will post, for the confirm pop-up. Sends nothing."""
+    blocked = _preview_guard()
+    if blocked:
+        return blocked
+    try:
+        names, video = _preview_attachments(request.form)
+        plan = _plan_stage(ticket_id, key, request.form, auth.current_tech(), bool(names), video)
+    except _Stop as exc:
+        return {"ok": False, "error": str(exc)}
+    label = plan["stage"]["label"]
+    if plan["body"] is None:
+        return {"ok": True, "title": label, "posts": [],
+                "summary": "Saved to the repair record only. Nothing is posted to Zendesk and the customer is not emailed."}
+    return {"ok": True, "title": label,
+            "posts": [{"public": plan["mode"] == "public", "body": plan["body"], "files": names}]}
+
+
 @portal_bp.route("/t/<int:ticket_id>/stage/<key>", methods=["POST"])
 def post_stage(ticket_id, key):
     if not db.available():
@@ -496,64 +603,16 @@ def post_stage(ticket_id, key):
     tech = _need_tech()
     if tech is None:
         return redirect(url_for("portal.tech_signin", next=url_for("portal.action_page", ticket_id=ticket_id)))
-    stage = repair_db.get_stage(key)
-    if stage is None:
-        flash("Unknown stage.", "error")
+    try:
+        uploads, video = _read_attachments(request.form)
+        plan = _plan_stage(ticket_id, key, request.form, tech, bool(uploads), video)
+    except _Stop as exc:
+        flash(str(exc), "error")
         return _back(ticket_id)
-    rma = repair_db.get_rma(ticket_id)
-    if rma is None:
-        flash("Add this ticket to the repair queue first.", "error")
-        return _back(ticket_id)
-
-    form = request.form
-    moving_back = repair_db.stage_index(key) < repair_db.stage_index(rma["stage"])
-    if moving_back and form.get("move_back") != "1":
-        flash(
-            f"This RMA is already past “{stage['label']}”. Tick “Move back to this stage” "
-            "if you really mean to go back (the customer is emailed again).",
-            "error",
-        )
-        return _back(ticket_id)
-    record_only = form.get("record_only") == "1"
-
-    uploads, upload_error = files.read_uploads(request.files.getlist("files"))
-    video = files.clean_video_url(form.get("video_url"))
-    if upload_error or video is False:
-        flash(upload_error or "That video link doesn't look like a web address (https://…).", "error")
-        return _back(ticket_id)
-
-    parsed = _read_stage_form(key, form, rma)
-    if isinstance(parsed, str):
-        flash(parsed, "error")
-        return _back(ticket_id)
-    fields, values, mode, internal = parsed
-    values = {**_base_values(rma), **values}
-
+    stage, rma, fields, mode, body, record_only = (
+        plan[k] for k in ("stage", "rma", "fields", "mode", "body", "record_only")
+    )
     zendesk = _get_zendesk()
-    if record_only:
-        # Only for tickets Zendesk has closed (no comments allowed): keep the
-        # repair record moving and tell CS to contact the customer another way.
-        if uploads or video:
-            flash("Zendesk won't take files on a closed ticket. Save the stage without them.", "error")
-            return _back(ticket_id)
-        try:
-            ticket, _req, _org = zendesk.get_ticket(ticket_id)
-        except ZendeskError as exc:
-            flash(f"Could not read ticket #{ticket_id} from Zendesk: {exc}", "error")
-            return _back(ticket_id)
-        if ticket.get("status") != "closed":
-            flash("This ticket is open in Zendesk, so post the stage normally.", "error")
-            return _back(ticket_id)
-        mode = "none"
-
-    if mode == "public":
-        body = _with_video(render_message(stage["comment_body"], values), video)
-    elif mode == "internal":
-        body = _with_video(internal, video)
-    elif uploads or video:  # nothing to tell the customer, but keep the files on the ticket
-        mode, body = "internal", _with_video(f"{stage['label']}: recorded by {tech['name']}.", video)
-    else:
-        body = None
 
     custom_fields = {}
     if stage_field_id() and stage.get("zendesk_value"):
@@ -656,6 +715,64 @@ def _read_picks(form, kind, required=True):
     return [c["id"] for c in choices], other, ", ".join(labels), None
 
 
+def _plan_action(form, has_files, video):
+    """Work out what an "Other update" button or a note would post. Raises _Stop."""
+    action_id = form.get("action_id")
+    note = (form.get("note") or "").strip()
+    action = None
+    if action_id:
+        try:
+            action = db.get_quick_action(int(action_id))
+        except ValueError:
+            action = None
+        if not action or not action["active"]:
+            raise _Stop("That update button no longer exists.")
+        public, kind = bool(action.get("public", True)), "action"
+        body = action["comment_body"]
+        tags = [portal_tag(), action["tag"]]
+        label = action["label"]
+    elif note or has_files or video:
+        public = form.get("note_visibility") == "public"
+        body, kind = note or ("Photos/files attached." if has_files else "Video link:"), "note"
+        tags = [portal_tag()]
+        label = "Public note" if public else "Internal note"
+    else:
+        raise _Stop("Pick an update, or write a note / attach a file first.")
+    note_public = form.get("note_visibility") == "public"
+    # A note, files or video typed alongside a button go in a SEPARATE post that
+    # follows the note's own Internal/Public choice, never the button's.
+    follow_up = None
+    if action is not None and (note or has_files or video):
+        follow_up = _with_video(note or "Photos/files attached.", video)
+    else:
+        body = _with_video(body, video)
+    return {
+        "action": action, "note": note, "public": public, "kind": kind, "body": body, "tags": tags,
+        "label": label, "note_public": note_public, "follow_up": follow_up,
+    }
+
+
+@portal_bp.route("/t/<int:ticket_id>/action/preview", methods=["POST"])
+def preview_action(ticket_id):
+    """What an "Other update" button or note will post, for the confirm pop-up. Sends nothing."""
+    blocked = _preview_guard()
+    if blocked:
+        return blocked
+    try:
+        names, video = _preview_attachments(request.form)
+        plan = _plan_action(request.form, bool(names), video)
+    except _Stop as exc:
+        return {"ok": False, "error": str(exc)}
+    if plan["follow_up"] is None:
+        posts = [{"public": plan["public"], "body": plan["body"], "files": names}]
+    else:  # the button's message, then the note in its own post
+        posts = [
+            {"public": plan["public"], "body": plan["body"], "files": []},
+            {"public": plan["note_public"], "body": plan["follow_up"], "files": names},
+        ]
+    return {"ok": True, "title": plan["label"], "posts": posts}
+
+
 @portal_bp.route("/t/<int:ticket_id>/action", methods=["POST"])
 def post_action(ticket_id):
     """Other updates (Awaiting parts, On hold...) and notes, with optional files (no stage change)."""
@@ -666,44 +783,16 @@ def post_action(ticket_id):
     if tech is None:
         return redirect(url_for("portal.tech_signin", next=url_for("portal.action_page", ticket_id=ticket_id)))
 
-    action_id = request.form.get("action_id")
-    note = (request.form.get("note") or "").strip()
-    uploads, upload_error = files.read_uploads(request.files.getlist("files"))
-    video = files.clean_video_url(request.form.get("video_url"))
-    if upload_error or video is False:
-        flash(upload_error or "That video link doesn't look like a web address (https://…).", "error")
+    try:
+        uploads, video = _read_attachments(request.form)
+        plan = _plan_action(request.form, bool(uploads), video)
+    except _Stop as exc:
+        flash(str(exc), "error")
         return _back(ticket_id)
-
-    action = None
-    if action_id:
-        try:
-            action = db.get_quick_action(int(action_id))
-        except ValueError:
-            action = None
-        if not action or not action["active"]:
-            flash("That update button no longer exists.", "error")
-            return _back(ticket_id)
-        public, kind = bool(action.get("public", True)), "action"
-        body = action["comment_body"]
-        tags = [portal_tag(), action["tag"]]
-        label = action["label"]
-    elif note or uploads or video:
-        public = request.form.get("note_visibility") == "public"
-        body, kind = note or ("Photos/files attached." if uploads else "Video link:"), "note"
-        tags = [portal_tag()]
-        label = "Public note" if public else "Internal note"
-    else:
-        flash("Pick an update, or write a note / attach a file first.", "error")
-        return _back(ticket_id)
+    action, note, public, kind, body, tags, label, note_public, follow_up = (
+        plan[k] for k in ("action", "note", "public", "kind", "body", "tags", "label", "note_public", "follow_up")
+    )
     excerpt = note[:NOTE_EXCERPT_CHARS] if note else None
-    note_public = request.form.get("note_visibility") == "public"
-    # A note, files or video typed alongside a button go in a SEPARATE post that
-    # follows the note's own Internal/Public choice, never the button's.
-    follow_up = None
-    if action is not None and (note or uploads or video):
-        follow_up = _with_video(note or "Photos/files attached.", video)
-    else:
-        body = _with_video(body, video)
 
     zendesk = _get_zendesk()
     try:

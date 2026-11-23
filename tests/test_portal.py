@@ -434,6 +434,49 @@ def test_quick_action_and_note_post_and_log(client, zd, tech):
     assert db.recent_actions(777)[0]["tech_initials"] == "Kyler"
 
 
+@needs_db
+def test_stage_preview_matches_the_post_and_sends_nothing(client, zd, tech):
+    _add(client)
+    resp = client.post("/t/500/stage/received/preview", data={**RECEIVED, "file_names": "arrived.jpg"})
+    data = resp.get_json()
+    assert data["ok"] is True and zd.updates == [] and repair_db.get_rma(500)["stage"] == "queued"
+    post = data["posts"][0]
+    assert post["public"] is True and post["files"] == ["arrived.jpg"]
+    client.post("/t/500/stage/received", data=RECEIVED)
+    assert zd.updates[0]["body"] == post["body"]
+
+
+@needs_db
+def test_stage_preview_reports_form_errors(client, zd, tech):
+    _add(client)
+    data = client.post("/t/500/stage/shipped/preview", data={"tracking_number": ""}).get_json()
+    assert data["ok"] is False and "tracking" in data["error"]
+    data = client.post("/t/500/stage/received/preview", data={**RECEIVED, "file_names": "x.exe"}).get_json()
+    assert data["ok"] is False and "x.exe" in data["error"]
+    assert zd.updates == []
+
+
+@needs_db
+def test_preview_needs_sign_in(clean_db, client, zd):
+    resp = client.post("/t/500/action/preview", data={"note": "hi"})
+    assert resp.status_code == 403 and resp.get_json()["ok"] is False
+
+
+@needs_db
+def test_action_preview_shows_button_and_note_as_separate_posts(client, zd, tech):
+    _add(client)
+    action = db.list_quick_actions()[0]
+    data = client.post(
+        "/t/500/action/preview",
+        data={"action_id": action["id"], "note": "Barrel on order", "note_visibility": "internal"},
+    ).get_json()
+    assert [p["public"] for p in data["posts"]] == [bool(action["public"]), False]
+    assert data["posts"][0]["body"] == action["comment_body"] and data["posts"][1]["body"] == "Barrel on order"
+    data = client.post("/t/500/action/preview", data={"note": "Hi", "note_visibility": "public"}).get_json()
+    assert data["posts"] == [{"public": True, "body": "Hi", "files": []}]
+    assert zd.updates == []
+
+
 # ---------------------------------------------------------------- report
 
 

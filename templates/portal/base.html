@@ -47,6 +47,7 @@
     // One tap = one post: disable a form's buttons once it submits (after the
     // browser has captured which button was pressed).
     document.addEventListener("submit", function (e) {
+      if (e.defaultPrevented) return;  // e.g. held for the confirm pop-up
       var buttons = e.target.querySelectorAll("button[type=submit]");
       setTimeout(function () { buttons.forEach(function (b) { b.disabled = true; }); }, 0);
     });
