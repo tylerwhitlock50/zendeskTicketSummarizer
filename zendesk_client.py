@@ -23,12 +23,20 @@ class ZendeskClient:
         self._fields_cache = None
         self._fields_cache_at = 0.0
 
-    def _get(self, path_or_url, params=None):
+    def _request(self, method, path_or_url, params=None, json=None, _retried=False):
         url = path_or_url if path_or_url.startswith("http") else self.base_url + path_or_url
         try:
-            resp = self.session.get(url, params=params, timeout=30)
+            resp = self.session.request(method, url, params=params, json=json, timeout=30)
         except requests.RequestException as exc:
             raise ZendeskError(f"Could not reach Zendesk: {exc}") from exc
+        if resp.status_code == 429 and not _retried:
+            # Rate limited: honor Retry-After once, then give up with a clear error.
+            try:
+                delay = min(float(resp.headers.get("Retry-After", 2)), 30.0)
+            except ValueError:
+                delay = 2.0
+            time.sleep(delay)
+            return self._request(method, path_or_url, params=params, json=json, _retried=True)
         if resp.status_code == 401:
             raise ZendeskError(
                 "Zendesk rejected the credentials (401). Check ZENDESK_EMAIL and "
@@ -43,6 +51,37 @@ class ZendeskClient:
                 status=resp.status_code,
             )
         return resp.json()
+
+    def _get(self, path_or_url, params=None):
+        return self._request("GET", path_or_url, params=params)
+
+    def add_comment(self, ticket_id, body, public=True):
+        """Post a comment to a ticket. public=True makes it visible to the requester."""
+        payload = {"ticket": {"comment": {"body": body, "public": bool(public)}}}
+        return self._request("PUT", f"/tickets/{ticket_id}.json", json=payload)
+
+    def add_tags(self, ticket_id, tags):
+        """Append tags to a ticket without touching the ones already there."""
+        return self._request("PUT", f"/tickets/{ticket_id}/tags.json", json={"tags": list(tags)})
+
+    def search_export(self, query, max_pages=20):
+        """Yield tickets matching a Zendesk search query via the export endpoint.
+
+        Uses cursor pagination (no 1,000-result cap). max_pages bounds the pull
+        so a runaway query cannot hang a request thread.
+        """
+        url = "/search/export"
+        params = {"filter[type]": "ticket", "page[size]": 100, "query": query}
+        for _ in range(max_pages):
+            data = self._get(url, params=params)
+            params = None  # the next link carries the full query string
+            for item in data.get("results", []):
+                yield item
+            if not (data.get("meta") or {}).get("has_more"):
+                return
+            url = (data.get("links") or {}).get("next")
+            if not url:
+                return
 
     def get_ticket(self, ticket_id):
         """Return (ticket, requester, organization) using sideloading."""

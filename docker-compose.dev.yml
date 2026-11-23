@@ -1,21 +1,21 @@
-# Dev overlay: adds a local Postgres for the RTM tracker.
+# Dev overlay: adds a local Postgres for the scan portal.
 # Run with: docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
 services:
   zendesk-ticket-print:
     environment:
-      RTM_DATABASE_URL: postgresql://postgres:rtm_dev@postgres:5432/rtm_dev
+      DATABASE_URL: postgresql://postgres:portal_dev@postgres:5432/portal_dev
     depends_on:
       - postgres
 
   postgres:
     image: postgres:16
     environment:
-      POSTGRES_DB: rtm_dev
-      POSTGRES_PASSWORD: rtm_dev
+      POSTGRES_DB: portal_dev
+      POSTGRES_PASSWORD: portal_dev
     ports:
       - "5433:5432"
     volumes:
-      - rtm_pgdata:/var/lib/postgresql/data
+      - portal_pgdata:/var/lib/postgresql/data
 
 volumes:
-  rtm_pgdata:
+  portal_pgdata:

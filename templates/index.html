@@ -28,7 +28,11 @@
       <button type="submit">Generate sheet</button>
     </form>
 
-    <p class="tagline"><a href="/rtm/">RTM Tracker</a></p>
+    <p class="tagline">
+      <a href="{{ url_for('portal.scan') }}">Scan portal</a> &middot;
+      <a href="{{ url_for('portal.report') }}">Tag report</a> &middot;
+      <a href="{{ url_for('portal.admin_actions') }}">Quick-action settings</a>
+    </p>
   </main>
 </body>
 </html>

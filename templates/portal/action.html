@@ -1,0 +1,72 @@
+{% extends "portal/base.html" %}
+{% block title %}Ticket #{{ ticket.id }} — actions{% endblock %}
+{% block content %}
+<header class="ticket-head">
+  <div>
+    <span class="ticket-id">Ticket #{{ ticket.id }}</span>
+    <span class="badge status-{{ ticket.status }}">{{ ticket.status|capitalize }}</span>
+  </div>
+  <h1>{{ ticket.subject or '(no subject)' }}</h1>
+  <p class="meta">
+    {{ requester.name if requester else 'Unknown requester' }}
+    {% if requester and requester.email %} &middot; {{ requester.email }}{% endif %}
+    &middot; updated {{ ticket.updated_at|datefmt }}
+  </p>
+  <p class="meta">
+    <a href="{{ url_for('ticket_sheet', ticket_id=ticket.id) }}">One-pager</a> &middot;
+    <a href="{{ agent_url }}" target="_blank" rel="noopener">Open in Zendesk</a>
+  </p>
+</header>
+
+{% if db_error %}<div class="notice warn">{{ db_error }}</div>{% endif %}
+
+{% if not db_error %}
+<section class="panel">
+  <h2>Quick actions <span class="subtle">posted as a public reply, tagged {{ base_tag }}</span></h2>
+  <form method="post" action="{{ url_for('portal.post_action', ticket_id=ticket.id) }}" class="actions-form">
+    <div class="action-grid">
+      {% for action in actions %}
+      <button type="submit" name="action_id" value="{{ action.id }}" class="action-btn"
+              title="{{ action.comment_body }}">{{ action.label }}</button>
+      {% else %}
+      <p class="empty">No quick actions configured yet — add some under
+        <a href="{{ url_for('portal.admin_actions') }}">Settings</a>.</p>
+      {% endfor %}
+    </div>
+    <label class="initials-label">Your initials
+      <input type="text" name="initials" value="{{ initials }}" maxlength="10" placeholder="e.g. TW">
+    </label>
+  </form>
+</section>
+
+<section class="panel">
+  <h2>Custom note</h2>
+  <form method="post" action="{{ url_for('portal.post_action', ticket_id=ticket.id) }}" class="note-form">
+    <textarea name="note" rows="3" placeholder="Write a note for this ticket…"></textarea>
+    <div class="note-controls">
+      <label><input type="radio" name="note_visibility" value="internal" checked> Internal note</label>
+      <label><input type="radio" name="note_visibility" value="public"> Public reply to customer</label>
+      <input type="hidden" name="initials" value="{{ initials }}">
+      <button type="submit">Post note</button>
+    </div>
+  </form>
+</section>
+
+<section class="panel">
+  <h2>Portal history <span class="subtle">this system only — full thread lives in Zendesk</span></h2>
+  {% if history %}
+  <table class="history">
+    {% for row in history %}
+    <tr>
+      <td>{{ row.created_at.strftime('%b %d %H:%M') }}</td>
+      <td>{{ row.action_label }}{% if row.note_excerpt %} — <em>{{ row.note_excerpt }}</em>{% endif %}</td>
+      <td>{{ row.tech_initials or '' }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% else %}
+  <p class="empty">No portal actions logged for this ticket yet.</p>
+  {% endif %}
+</section>
+{% endif %}
+{% endblock %}
