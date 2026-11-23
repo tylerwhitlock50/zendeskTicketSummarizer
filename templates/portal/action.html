@@ -1,8 +1,7 @@
 {% extends "portal/base.html" %}
-{% block title %}Ticket #{{ ticket.id }}{% endblock %}
-{% macro checklist(kind, title, items, picked, other) %}
-<fieldset class="checklist">
-  <legend>{{ title }} <span class="subtle">tick all that apply</span></legend>
+{% macro checklist(kind, title, items, picked, other, hint='tick all that apply', required=None) %}
+<fieldset class="checklist"{% if required %} data-required="{{ required }}"{% endif %}>
+  <legend>{{ title }} <span class="subtle">{{ hint }}</span></legend>
   <div class="check-grid">
     {% for c in items %}
     <label class="check-item"><input type="checkbox" name="{{ kind }}_ids" value="{{ c.id }}"
@@ -13,9 +12,27 @@
     <input type="text" name="{{ kind }}_other" value="{{ other or '' }}" maxlength="200" autocomplete="off">
   </label>
   <label class="check-line add-line"><input type="checkbox" name="{{ kind }}_add" value="1">
-    Add this Other to the {{ kind }} list for next time</label>
+    Add this Other to the list for next time</label>
 </fieldset>
 {% endmacro %}
+{% macro attach(hint='Photos, PDF or Excel') %}
+<div class="attach-row">
+  <label>Attach files <span class="subtle">{{ hint }}</span>
+    <input type="file" name="files" multiple accept="{{ accept }}">
+  </label>
+  <label>Video link <span class="subtle">optional</span>
+    <input type="url" name="video_url" placeholder="https://…" autocomplete="off">
+  </label>
+</div>
+{% endmacro %}
+{% macro yesno(name, value, yes='Yes', no='No', extra=None) %}
+<span class="seg">
+  <label><input type="radio" name="{{ name }}" value="yes" {% if value == 'yes' %}checked{% endif %} required> {{ yes }}</label>
+  {% if extra %}<label><input type="radio" name="{{ name }}" value="{{ extra[0] }}" {% if value == extra[0] %}checked{% endif %}> {{ extra[1] }}</label>{% endif %}
+  <label><input type="radio" name="{{ name }}" value="no" {% if value == 'no' %}checked{% endif %}> {{ no }}</label>
+</span>
+{% endmacro %}
+{% block title %}Ticket #{{ ticket.id }}{% endblock %}
 {% block content %}
 {% set closed = ticket.status == 'closed' %}
 <header class="ticket-head">
@@ -26,6 +43,7 @@
       <span class="stage-pill stage-{{ rma.stage }}">
         {{ (stages|selectattr('key', 'equalto', rma.stage)|map(attribute='label')|first) or 'Waiting to receive' }}
       </span>
+      {% if rma.flag %}<span class="flag-pill">{{ rma.flag }}</span>{% endif %}
     {% endif %}
   </div>
   <h1>{{ ticket.subject or '(no subject)' }}</h1>
@@ -37,6 +55,12 @@
     <a href="{{ url_for('ticket_sheet', ticket_id=ticket.id) }}">Print sheet</a> &middot;
     <a href="{{ agent_url }}" target="_blank" rel="noopener">Open in Zendesk</a>
   </p>
+  {% if complaint %}
+  <details class="complaint" {% if rma and rma.stage in ('queued', 'received') %}open{% endif %}>
+    <summary>Customer's complaint</summary>
+    <p>{{ complaint }}</p>
+  </details>
+  {% endif %}
 </header>
 
 {% if db_error %}<div class="notice warn">{{ db_error }}</div>{% endif %}
@@ -47,7 +71,7 @@
 {% if not db_error %}
   {% if not tech %}
   <div class="notice warn">
-    <a href="{{ url_for('portal.tech_signin', next=request.path) }}">Sign in with your name and PIN</a> to post updates.
+    <a href="{{ url_for('portal.tech_signin', next=request.path) }}">Sign in with your name and PIN</a> to post updates and see photos.
   </div>
   {% endif %}
 
@@ -62,7 +86,7 @@
   </section>
   {% else %}
   <section class="panel">
-    <h2>Update the stage <span class="subtle">each one emails the customer through Zendesk</span></h2>
+    <h2>Update the stage <span class="subtle">each one is posted to the Zendesk ticket</span></h2>
     <div class="stage-list">
       {% for stage in stages %}
       {% set done_at = rma[stage.key ~ '_at'] %}
@@ -70,26 +94,108 @@
                {% if stage.key == next_stage %}open{% endif %}>
         <summary>
           <span class="stage-name">{{ stage.label }}</span>
-          {% if done_at %}<span class="stage-done">done {{ done_at|localtime }}</span>{% endif %}
+          {% if done_at %}<span class="stage-done">done {{ done_at|localtime }}{% if stage_by.get(stage.key) %} by {{ stage_by[stage.key]|initials }}{% endif %}</span>{% endif %}
         </summary>
-        <form method="post" action="{{ url_for('portal.post_stage', ticket_id=ticket.id, key=stage.key) }}" class="stage-form">
+        <form method="post" enctype="multipart/form-data"
+              action="{{ url_for('portal.post_stage', ticket_id=ticket.id, key=stage.key) }}" class="stage-form">
           {{ csrf_field() }}
-          {% if stage.key == 'inspected' %}
-            {{ checklist('problem', 'Problems found', problems, rma.problem_ids, rma.problem_other) }}
+
+          {% if stage.key == 'received' %}
+            {{ attach('Photos of the rifle as it arrived') }}
+            {{ checklist('accessory', 'Items received with it', lists.accessory, rma.accessory_ids, rma.accessory_other, 'tick everything in the box') }}
+            <div class="field-row">
+              <span class="field-label">Any damage or shipping issues?</span>
+              {{ yesno('arrival_damage', 'yes' if rma.arrival_damage else ('no' if rma.arrival_damage is false else None)) }}
+            </div>
+            <label>Describe damage / shipping issues <span class="subtle">included in the customer email when Yes</span>
+              <textarea name="arrival_notes" rows="2">{{ rma.arrival_notes or '' }}</textarea>
+            </label>
+
+          {% elif stage.key == 'inspected' %}
+            {% if complaint %}<blockquote class="complaint-quote"><span class="subtle">Customer says:</span> {{ complaint|truncate(400) }}</blockquote>{% endif %}
+            {% set prior = {} %}
+            {% for p in rma.inspection or [] %}{% set _ = prior.update({p.id: p}) %}{% endfor %}
+            <fieldset class="checklist">
+              <legend>{{ lists.inspection_point|length }}-point inspection
+                <button type="button" class="link-btn small" data-fill-ok>Mark the rest OK</button></legend>
+              <table class="points">
+                {% for p in lists.inspection_point %}
+                {% set was = prior.get(p.id, {}) %}
+                <tr>
+                  <td class="point-label">{{ p.label }}</td>
+                  <td class="point-result">
+                    <span class="seg">
+                      {% for val, word in (('ok', 'OK'), ('issue', 'Issue'), ('na', 'N/A')) %}
+                      <label class="seg-{{ val }}"><input type="radio" name="point_{{ p.id }}" value="{{ val }}"
+                        {% if was.result == val %}checked{% endif %} {% if loop.first %}required{% endif %}> {{ word }}</label>
+                      {% endfor %}
+                    </span>
+                  </td>
+                  <td><input type="text" name="point_note_{{ p.id }}" value="{{ was.note or '' }}" placeholder="Note" maxlength="200"></td>
+                </tr>
+                {% endfor %}
+              </table>
+            </fieldset>
+            <div class="field-row">
+              <span class="field-label">Does it match the customer's complaint?</span>
+              {{ yesno('complaint_match', rma.complaint_match, extra=('partly', 'Partly')) }}
+            </div>
+            {{ checklist('problem', 'Problems found', lists.problem, rma.problem_ids, rma.problem_other, required='Tick at least one problem found, or describe it under Other.') }}
             <label>Inspection notes <span class="subtle">internal only</span>
               <textarea name="problem_notes" rows="2">{{ rma.problem_notes or '' }}</textarea>
             </label>
+            {{ attach('Photos of what you found') }}
+
           {% elif stage.key == 'repaired' %}
-            {{ checklist('solution', 'Repairs done', solutions, rma.solution_ids, rma.solution_other) }}
+            {{ checklist('solution', 'Repairs done', lists.solution, rma.solution_ids, rma.solution_other, required='Tick at least one repair done, or describe it under Other.') }}
             <label>Work done <span class="subtle">sent to the customer</span>
               <textarea name="work_done" rows="2" placeholder="Blank uses the repairs ticked above">{{ rma.work_done or '' }}</textarea>
             </label>
+            {{ attach() }}
+
+          {% elif stage.key == 'tested' %}
+            <div class="field-row">
+              <span class="field-label">Accuracy test required?</span>
+              {{ yesno('test_required', 'yes' if rma.test_required else ('no' if rma.test_required is false else None)) }}
+            </div>
+            <div class="test-fields">
+              <div class="field-row">
+                <span class="field-label">Result</span>
+                <span class="seg">
+                  <label class="seg-ok"><input type="radio" name="test_result" value="pass" {% if rma.test_result == 'pass' %}checked{% endif %}> Pass</label>
+                  <label class="seg-issue"><input type="radio" name="test_result" value="fail" {% if rma.test_result == 'fail' %}checked{% endif %}> Fail</label>
+                </span>
+              </div>
+              <div class="inline-fields">
+                <label>Group size
+                  <input type="number" name="group_size" step="0.001" min="0" max="20" value="{{ rma.group_size if rma.group_size is not none else '' }}" inputmode="decimal"></label>
+                <label>Unit
+                  <select name="group_unit">
+                    <option value="moa" {% if rma.group_unit != 'in' %}selected{% endif %}>MOA</option>
+                    <option value="in" {% if rma.group_unit == 'in' %}selected{% endif %}>inches</option>
+                  </select></label>
+                <label>Distance (yd)
+                  <input type="number" name="test_distance" min="10" max="2000" value="{{ rma.test_distance or 100 }}" inputmode="numeric"></label>
+              </div>
+              <label>Ammunition used
+                <input type="text" name="test_ammo" value="{{ rma.test_ammo or '' }}" maxlength="120" placeholder="e.g. Hornady Precision Hunter 6.5 CM 143gr ELD-X"></label>
+              <p class="hint">A pass emails the customer. A fail is saved as an internal note and flags the rifle on the queue. "Not required" is recorded without emailing.</p>
+            </div>
+            {{ attach('Photo of the target') }}
+
           {% elif stage.key == 'shipped' %}
+            {% if rma.test_required and rma.test_result == 'fail' %}
+            <div class="notice warn">This rifle <strong>failed</strong> its accuracy test. Re-test it before shipping.</div>
+            <label class="check-line"><input type="checkbox" name="ship_failed" value="1">
+              Ship anyway (a manager approved shipping it as is)</label>
+            {% endif %}
             <label>Return tracking number
               <input type="text" name="tracking_number" value="{{ rma.tracking_number or '' }}"
                      autocomplete="off" required placeholder="Scan the label barcode">
             </label>
+            {{ attach() }}
           {% endif %}
+
           <p class="message-preview"><span class="subtle">Customer message:</span> {{ stage.comment_body }}</p>
           {% if loop.index0 < current_index %}
           <label class="check-line"><input type="checkbox" name="move_back" value="1">
@@ -106,26 +212,27 @@
   </section>
   {% endif %}
 
-  {% if actions %}
   <section class="panel">
-    <h2>Other updates <span class="subtle">posted as a public reply</span></h2>
-    <form method="post" action="{{ url_for('portal.post_action', ticket_id=ticket.id) }}" class="actions-form">
+    <h2>Other updates <span class="subtle">no stage change</span>
+      {% if rma and rma.flag %}
+      <form method="post" action="{{ url_for('portal.clear_flag', ticket_id=ticket.id) }}" class="inline-form right">
+        {{ csrf_field() }}<button type="submit" class="link-btn small" {% if not tech %}disabled{% endif %}>Clear “{{ rma.flag }}”</button>
+      </form>
+      {% endif %}
+    </h2>
+    <form method="post" enctype="multipart/form-data" action="{{ url_for('portal.post_action', ticket_id=ticket.id) }}" class="note-form">
       {{ csrf_field() }}
+      {% if actions %}
       <div class="action-grid">
         {% for action in actions %}
-        <button type="submit" name="action_id" value="{{ action.id }}" class="action-btn"
+        <button type="submit" name="action_id" value="{{ action.id }}" class="action-btn {% if not action.public %}internal{% endif %}"
                 title="{{ action.comment_body }}" {% if not tech or closed %}disabled{% endif %}>{{ action.label }}</button>
         {% endfor %}
       </div>
-    </form>
-  </section>
-  {% endif %}
-
-  <section class="panel">
-    <h2>Note</h2>
-    <form method="post" action="{{ url_for('portal.post_action', ticket_id=ticket.id) }}" class="note-form">
-      {{ csrf_field() }}
-      <textarea name="note" rows="3" placeholder="Write a note for this ticket…"></textarea>
+      <p class="hint">Buttons post their message to the customer{% if actions|rejectattr('public')|list %} (grey ones are internal){% endif %} and show on the queue card. A note or files added below are posted separately, as Internal or Public per your choice.</p>
+      {% endif %}
+      <textarea name="note" rows="3" placeholder="Write a note…"></textarea>
+      {{ attach() }}
       <div class="note-controls">
         <label><input type="radio" name="note_visibility" value="internal" checked> Internal note</label>
         <label><input type="radio" name="note_visibility" value="public"> Public reply to customer</label>
@@ -134,21 +241,60 @@
     </form>
   </section>
 
+  {% if tech %}
+  <section class="panel">
+    <h2>Photos and files <span class="subtle">everything on the Zendesk ticket, including what the customer sent</span></h2>
+    {% if gallery_error %}<div class="notice warn">{{ gallery_error }}</div>{% endif %}
+    {% set videos = history|selectattr('detail.video_url')|list if history else [] %}
+    {% if gallery or videos %}
+    <div class="gallery">
+      {% for f in gallery %}
+      <a class="gallery-item" href="{{ url_for('portal.ticket_file', ticket_id=ticket.id, file_id=f.id) }}" target="_blank" rel="noopener">
+        {% if f.inline or f.thumb_id %}
+          <img src="{{ url_for('portal.ticket_file', ticket_id=ticket.id, file_id=f.thumb_id or f.id) }}" alt="{{ f.name }}" loading="lazy">
+        {% else %}
+          <span class="file-chip">{{ (f.name.rsplit('.', 1)[-1] if '.' in f.name else 'file')|upper }}</span>
+        {% endif %}
+        <span class="file-name">{{ f.name }}</span>
+        <span class="file-meta">{{ f.author }} &middot; {{ f.created_at|datefmt }}{% if not f.public %} &middot; internal{% endif %}</span>
+      </a>
+      {% endfor %}
+    </div>
+    {% for e in videos %}
+    <p class="video-link">Video ({{ e.label }}, {{ e.created_at|localtime }}): <a href="{{ e.detail.video_url }}" target="_blank" rel="noopener noreferrer">{{ e.detail.video_url }}</a></p>
+    {% endfor %}
+    {% else %}
+    <p class="empty">No photos or files on this ticket yet.</p>
+    {% endif %}
+  </section>
+  {% endif %}
+
   {% if rma %}
   <section class="panel">
     <h2>Repair record</h2>
     <dl class="record">
       <dt>Added</dt><dd>{{ rma.added_at|localtime }} by {{ rma.added_by or '—' }}</dd>
+      {% if rma.received_at %}<dt>Received with</dt><dd>{{ rma.accessory_summary or 'nothing listed' }}</dd>
+        <dt>On arrival</dt><dd>{% if rma.arrival_damage %}<strong>Damage noted:</strong> {{ rma.arrival_notes }}{% else %}No damage noted{% endif %}</dd>{% endif %}
+      {% if rma.inspection %}<dt>Inspection</dt><dd>
+        {% set issues = rma.inspection|selectattr('result', 'equalto', 'issue')|list %}
+        {{ rma.inspection|length }} points, {{ issues|length }} with issues{% for p in issues %}<br>&bull; {{ p.label }}{% if p.note %}: {{ p.note }}{% endif %}{% endfor %}
+        {% if rma.complaint_match %}<br>Matches complaint: {{ {'yes': 'Yes', 'partly': 'Partly', 'no': 'No'}[rma.complaint_match] }}{% endif %}</dd>{% endif %}
       {% if rma.problem_summary %}<dt>Problems</dt><dd>{{ rma.problem_summary }}{% if rma.problem_notes %} — {{ rma.problem_notes }}{% endif %}</dd>{% endif %}
       {% if rma.solution_summary %}<dt>Repairs</dt><dd>{{ rma.solution_summary }}{% if rma.work_done %} — {{ rma.work_done }}{% endif %}</dd>{% endif %}
+      {% if rma.tested_at %}<dt>Accuracy test</dt><dd>
+        {% if rma.test_required is false %}Not required{% else %}
+        {{ 'Passed' if rma.test_result == 'pass' else 'FAILED' }}: {{ '%g'|format(rma.group_size|float) }}{{ ' MOA' if rma.group_unit == 'moa' else '"' }} at {{ rma.test_distance }} yd, {{ rma.test_ammo }}{% endif %}</dd>{% endif %}
       {% if rma.tracking_number %}<dt>Tracking</dt><dd>{{ rma.tracking_number }}</dd>{% endif %}
     </dl>
     <table class="history">
       {% for e in history %}
       <tr>
         <td class="when">{{ e.created_at|localtime }}</td>
-        <td>{{ e.label }}{% if e.detail and e.detail.note %} — <em>{{ e.detail.note }}</em>{% endif %}</td>
-        <td>{{ e.tech_name or '' }}</td>
+        <td>{{ e.label }}{% if e.detail and e.detail.note %} — <em>{{ e.detail.note }}</em>{% endif %}
+          {% if e.detail and e.detail.files %}<span class="subtle"> ({{ e.detail.files|length }} file{{ 's' if e.detail.files|length > 1 }})</span>{% endif %}
+          {% if e.detail and e.detail.not_emailed %}<span class="subtle"> (not emailed)</span>{% endif %}</td>
+        <td>{{ e.tech_name|initials if e.tech_name else '' }}</td>
       </tr>
       {% endfor %}
     </table>
@@ -170,4 +316,54 @@
   </section>
   {% endif %}
 {% endif %}
+<script>
+  // Inspection: one tap marks every unanswered point OK (techs still change the ones with issues).
+  document.querySelectorAll("[data-fill-ok]").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      btn.closest("fieldset").querySelectorAll("tr").forEach(function (row) {
+        if (!row.querySelector("input[type=radio]:checked")) {
+          var ok = row.querySelector("input[value=ok]");
+          if (ok) ok.checked = true;
+        }
+      });
+    });
+  });
+  // Enter in a one-line box must not press the first update button.
+  document.querySelectorAll("form.note-form input:not([type=submit])").forEach(function (el) {
+    el.addEventListener("keydown", function (e) { if (e.key === "Enter") e.preventDefault(); });
+  });
+  // Catch missing answers before the page is sent (so ticks and photos aren't lost on a bounce).
+  document.querySelectorAll("form.stage-form").forEach(function (form) {
+    form.addEventListener("submit", function (e) {
+      var lists = form.querySelectorAll("fieldset.checklist[data-required]");
+      for (var i = 0; i < lists.length; i++) {
+        var box = lists[i];
+        var ticked = box.querySelector("input[type=checkbox][name$=_ids]:checked");
+        var other = box.querySelector("input[name$=_other]");
+        if (!ticked && !(other && other.value.trim())) {
+          e.preventDefault(); e.stopImmediatePropagation();
+          alert(box.getAttribute("data-required")); return;
+        }
+      }
+      var req = form.querySelector("input[name=test_required]:checked");
+      if (req && req.value === "yes") {
+        var missing = [];
+        if (!form.querySelector("input[name=test_result]:checked")) missing.push("result");
+        if (!form.querySelector("input[name=group_size]").value) missing.push("group size");
+        if (!form.querySelector("input[name=test_ammo]").value.trim()) missing.push("ammunition");
+        if (missing.length) { e.preventDefault(); e.stopImmediatePropagation(); alert("Enter the " + missing.join(", ") + "."); }
+      }
+    }, true);
+  });
+  // Accuracy test: hide the result fields when no test is required.
+  document.querySelectorAll("input[name=test_required]").forEach(function (r) {
+    function sync() {
+      var form = r.closest("form"), box = form.querySelector(".test-fields");
+      var picked = form.querySelector("input[name=test_required]:checked");
+      if (box) box.style.display = picked && picked.value === "no" ? "none" : "";
+    }
+    r.addEventListener("change", sync);
+    sync();
+  });
+</script>
 {% endblock %}

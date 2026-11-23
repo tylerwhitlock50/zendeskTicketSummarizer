@@ -72,7 +72,7 @@ def list_quick_actions(include_inactive: bool = False) -> list[dict[str, Any]]:
     where = "" if include_inactive else "WHERE active"
     with _conn() as conn:
         return conn.execute(
-            f"SELECT id, label, comment_body, tag, position, active "
+            f"SELECT id, label, comment_body, tag, position, active, public "
             f"FROM portal.quick_action {where} ORDER BY position, id"
         ).fetchall()
 
@@ -80,31 +80,32 @@ def list_quick_actions(include_inactive: bool = False) -> list[dict[str, Any]]:
 def get_quick_action(action_id: int) -> Optional[dict[str, Any]]:
     with _conn() as conn:
         return conn.execute(
-            "SELECT id, label, comment_body, tag, position, active "
+            "SELECT id, label, comment_body, tag, position, active, public "
             "FROM portal.quick_action WHERE id = %s",
             (action_id,),
         ).fetchone()
 
 
-def create_quick_action(label: str, comment_body: str, tag: str) -> None:
+def create_quick_action(label: str, comment_body: str, tag: str, public: bool = True) -> None:
     with _conn() as conn:
         conn.execute(
-            "INSERT INTO portal.quick_action (label, comment_body, tag, position) "
-            "VALUES (%s, %s, %s, "
+            "INSERT INTO portal.quick_action (label, comment_body, tag, public, position) "
+            "VALUES (%s, %s, %s, %s, "
             "  (SELECT COALESCE(MAX(position), 0) + 10 FROM portal.quick_action))",
-            (label, comment_body, tag),
+            (label, comment_body, tag, public),
         )
 
 
 def update_quick_action(
-    action_id: int, label: str, comment_body: str, tag: str, position: int, active: bool
+    action_id: int, label: str, comment_body: str, tag: str, position: int, active: bool,
+    public: bool = True,
 ) -> None:
     with _conn() as conn:
         conn.execute(
             "UPDATE portal.quick_action "
-            "SET label = %s, comment_body = %s, tag = %s, position = %s, active = %s "
+            "SET label = %s, comment_body = %s, tag = %s, position = %s, active = %s, public = %s "
             "WHERE id = %s",
-            (label, comment_body, tag, position, active, action_id),
+            (label, comment_body, tag, position, active, public, action_id),
         )
 
 

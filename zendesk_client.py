@@ -23,10 +23,12 @@ class ZendeskClient:
         self._fields_cache = None
         self._fields_cache_at = 0.0
 
-    def _request(self, method, path_or_url, params=None, json=None, _retried=False):
+    def _request(self, method, path_or_url, params=None, json=None, data=None, headers=None, _retried=False):
         url = path_or_url if path_or_url.startswith("http") else self.base_url + path_or_url
         try:
-            resp = self.session.request(method, url, params=params, json=json, timeout=30)
+            resp = self.session.request(
+                method, url, params=params, json=json, data=data, headers=headers, timeout=60
+            )
         except requests.RequestException as exc:
             raise ZendeskError(f"Could not reach Zendesk: {exc}") from exc
         if resp.status_code == 429 and not _retried:
@@ -36,7 +38,9 @@ class ZendeskClient:
             except ValueError:
                 delay = 2.0
             time.sleep(delay)
-            return self._request(method, path_or_url, params=params, json=json, _retried=True)
+            return self._request(
+                method, path_or_url, params=params, json=json, data=data, headers=headers, _retried=True
+            )
         if resp.status_code == 401:
             raise ZendeskError(
                 "Zendesk rejected the credentials (401). Check ZENDESK_EMAIL and "
@@ -60,7 +64,7 @@ class ZendeskClient:
         payload = {"ticket": {"comment": {"body": body, "public": bool(public)}}}
         return self._request("PUT", f"/tickets/{ticket_id}.json", json=payload)
 
-    def post_update(self, ticket_id, body, public=True, tags=None, custom_fields=None):
+    def post_update(self, ticket_id, body, public=True, tags=None, custom_fields=None, uploads=None):
         """Comment, add tags and set custom fields in ONE ticket update.
 
         One request means the customer email and the tag/field change land
@@ -68,11 +72,49 @@ class ZendeskClient:
         have failed. ``additional_tags`` appends without replacing existing tags.
         """
         ticket = {"comment": {"body": body, "public": bool(public)}}
+        if uploads:
+            ticket["comment"]["uploads"] = list(uploads)  # tokens from upload_file()
         if tags:
             ticket["additional_tags"] = list(tags)
         if custom_fields:
             ticket["custom_fields"] = [{"id": fid, "value": val} for fid, val in custom_fields.items()]
         return self._request("PUT", f"/tickets/{ticket_id}.json", json={"ticket": ticket})
+
+    def upload_file(self, filename, data, content_type):
+        """Upload a file; returns the token to attach it to the next comment.
+
+        Tokens expire after 60 minutes if no comment uses them.
+        """
+        result = self._request(
+            "POST",
+            "/uploads.json",
+            params={"filename": filename},
+            data=data,
+            headers={"Content-Type": content_type or "application/octet-stream"},
+        )
+        return result["upload"]["token"]
+
+    def download(self, content_url, max_bytes=60 * 1024 * 1024):
+        """Fetch an attachment's bytes (follows Zendesk's redirect to its file store).
+
+        Only URLs on this account's Zendesk host are fetched with credentials.
+        """
+        host = self.base_url.split("/api/v2")[0]
+        if not content_url.startswith(host + "/"):
+            raise ZendeskError("Refusing to fetch a file from outside this Zendesk account.")
+        try:
+            resp = self.session.get(content_url, timeout=60, stream=True)
+        except requests.RequestException as exc:
+            raise ZendeskError(f"Could not reach Zendesk: {exc}") from exc
+        if not resp.ok:
+            raise ZendeskError(f"Zendesk returned {resp.status_code} for that file.", status=resp.status_code)
+        chunks, size = [], 0
+        for chunk in resp.iter_content(64 * 1024):
+            size += len(chunk)
+            if size > max_bytes:
+                raise ZendeskError("That file is too large to show here; open it in Zendesk.")
+            chunks.append(chunk)
+        return b"".join(chunks), resp.headers.get("Content-Type", "application/octet-stream")
 
     def add_tags(self, ticket_id, tags):
         """Append tags to a ticket without touching the ones already there."""
