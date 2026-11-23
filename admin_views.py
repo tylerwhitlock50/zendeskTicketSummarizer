@@ -16,6 +16,12 @@ from portal_views import intake_tag, portal_tag, stage_field_id
 admin_bp = Blueprint("admin", __name__, url_prefix="/admin")
 
 PIN_RE = re.compile(r"^\d{4,8}$")
+LIST_TITLES = (
+    ("inspection_point", "Inspection checklist (Inspected)"),
+    ("accessory", "Items received with it (Received)"),
+    ("problem", "Problems found (Inspected)"),
+    ("solution", "Repairs done (Repair complete)"),
+)
 
 
 def _clean_tag(raw):
@@ -61,8 +67,10 @@ def settings():
         "portal/settings.html",
         ready=True,
         stages=repair_db.list_stages(),
-        problems=repair_db.list_choices("problem", include_inactive=True),
-        solutions=repair_db.list_choices("solution", include_inactive=True),
+        lists=[
+            (kind, title, repair_db.list_choices(kind, include_inactive=True))
+            for kind, title in LIST_TITLES
+        ],
         techs=repair_db.list_techs(include_inactive=True),
         actions=db.list_quick_actions(include_inactive=True),
         base_tag=portal_tag(),
@@ -97,7 +105,7 @@ def save_stage(key):
 def save_choice():
     form = request.form
     kind = form.get("kind")
-    if kind not in ("problem", "solution"):
+    if kind not in repair_db.CHOICE_KINDS:
         flash("Unknown list.", "error")
         return _done("lists")
     label = (form.get("label") or "").strip()
@@ -156,11 +164,17 @@ def save_action():
         flash("Label, comment text, and tag are all required.", "error")
         return _done("actions")
     if form.get("op") == "create":
-        db.create_quick_action(label, body, tag)
+        db.create_quick_action(label, body, tag, form.get("public") == "on")
         flash(f"Added “{label}”.", "success")
     else:
         db.update_quick_action(
-            _int(form.get("id")), label, body, tag, _int(form.get("position")), form.get("active") == "on"
+            _int(form.get("id")),
+            label,
+            body,
+            tag,
+            _int(form.get("position")),
+            form.get("active") == "on",
+            form.get("public") == "on",
         )
         flash(f"Saved “{label}”.", "success")
     return _done("actions")

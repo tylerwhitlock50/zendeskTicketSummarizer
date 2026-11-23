@@ -37,6 +37,14 @@ import repair_db  # noqa: E402
 
 needs_db = pytest.mark.skipif(not TEST_DSN, reason="TEST_DATABASE_URL not set")
 
+RECEIVED = {"arrival_damage": "no"}
+
+
+def inspected():
+    """Answers every inspection point OK and the complaint question, for stage posts."""
+    points = repair_db.list_choices("inspection_point")
+    return {**{f"point_{p['id']}": "ok" for p in points}, "complaint_match": "yes"}
+
 
 # ---------------------------------------------------------------- fakes
 
@@ -50,6 +58,8 @@ class FakeZendesk:
         self.queries = []
         self.tag_calls = []
         self.delay = 0.0
+        self.uploaded = {}
+        self.comments = {}
 
     def get_ticket(self, ticket_id):
         ticket = {
@@ -59,17 +69,42 @@ class FakeZendesk:
             "updated_at": "2026-11-20T10:00:00Z",
             "created_at": "2026-11-01T10:00:00Z",
             "custom_fields": [],
+            "description": "My rifle won't group under 3 MOA since the last trip.",
         }
         requester = {"id": 1, "name": "Jane Hunter", "email": "jane@example.com"}
         return ticket, requester, None
 
-    def post_update(self, ticket_id, body, public=True, tags=None, custom_fields=None):
+    def upload_file(self, filename, data, content_type):
+        token = f"tok{len(self.uploaded) + 1}"
+        self.uploaded[token] = (filename, data, content_type)
+        return token
+
+    def get_comments(self, ticket_id):
+        return list(self.comments.get(ticket_id, [])), {7: {"id": 7, "name": "Kyler"}}
+
+    def download(self, content_url, max_bytes=None):
+        for name, data, ctype in self.uploaded.values():
+            if content_url.endswith("/" + name):
+                return data, ctype
+        raise portal_views.ZendeskError("not found", status=404)
+
+    def post_update(self, ticket_id, body, public=True, tags=None, custom_fields=None, uploads=None):
         if self.fail:
             raise portal_views.ZendeskError("Zendesk API error 422: closed", status=422)
         if self.delay:
             time.sleep(self.delay)
+        attachments = []
+        for tok in uploads or []:
+            name, data, ctype = self.uploaded[tok]
+            attachments.append({"id": 9000 + len(self.uploaded) * 10 + len(attachments), "file_name": name,
+                                "content_type": ctype, "size": len(data),
+                                "content_url": f"https://example.zendesk.com/attachments/{name}", "thumbnails": []})
+        self.comments.setdefault(ticket_id, []).append(
+            {"author_id": 7, "public": public, "created_at": "2026-11-23T20:00:00Z", "attachments": attachments}
+        )
         self.updates.append(
             {
+                "uploads": list(uploads or []),
                 "ticket_id": ticket_id,
                 "body": body,
                 "public": public,
@@ -221,7 +256,7 @@ def test_inactive_tech_cannot_sign_in(clean_db, client):
 
 @needs_db
 def test_posting_requires_sign_in(clean_db, client, zd):
-    resp = client.post("/t/500/stage/received")
+    resp = client.post("/t/500/stage/received", data=RECEIVED)
     assert resp.status_code == 302 and "/tech" in resp.headers["Location"]
     assert zd.updates == []
 
@@ -267,14 +302,14 @@ def test_closed_ticket_cannot_be_added(client, zd, tech):
 
 @needs_db
 def test_stage_requires_ticket_in_queue(client, zd, tech):
-    client.post("/t/500/stage/received")
+    client.post("/t/500/stage/received", data=RECEIVED)
     assert zd.updates == []
 
 
 @needs_db
 def test_received_posts_one_update_and_records(client, zd, tech):
     _add(client)
-    client.post("/t/500/stage/received")
+    client.post("/t/500/stage/received", data=RECEIVED)
     assert len(zd.updates) == 1
     u = zd.updates[0]
     assert u["public"] is True and "arrived" in u["body"]
@@ -290,14 +325,14 @@ def test_received_posts_one_update_and_records(client, zd, tech):
 @needs_db
 def test_inspected_needs_problem_and_keeps_notes_internal(client, zd, tech):
     _add(client)
-    client.post("/t/500/stage/inspected", data={"problem_notes": "x"})
+    client.post("/t/500/stage/inspected", data={**inspected(), "problem_notes": "x"})
     assert zd.updates == []
     trigger = _choice("problem", "Trigger")
     client.post(
         "/t/500/stage/inspected",
-        data={"problem_ids": [trigger["id"]], "problem_notes": "Sear worn, internal note"},
+        data={**inspected(), "problem_ids": [trigger["id"]], "problem_notes": "Sear worn, internal note"},
     )
-    assert "found the following: Trigger." in zd.updates[0]["body"]
+    assert "Findings: Trigger." in zd.updates[0]["body"]
     assert "Sear worn" not in zd.updates[0]["body"]
     rma = repair_db.get_rma(500)
     assert rma["problem_summary"] == "Trigger" and rma["problem_notes"] == "Sear worn, internal note"
@@ -329,8 +364,8 @@ def test_shipped_requires_tracking(client, zd, tech):
 @needs_db
 def test_double_tap_does_not_email_twice(client, zd, tech):
     _add(client)
-    client.post("/t/500/stage/received")
-    resp = client.post("/t/500/stage/received", follow_redirects=True)
+    client.post("/t/500/stage/received", data=RECEIVED)
+    resp = client.post("/t/500/stage/received", data=RECEIVED, follow_redirects=True)
     assert len(zd.updates) == 1
     assert b"was just posted" in resp.data
 
@@ -339,7 +374,7 @@ def test_double_tap_does_not_email_twice(client, zd, tech):
 def test_zendesk_failure_saves_nothing(client, zd, tech):
     _add(client)
     zd.fail = True
-    resp = client.post("/t/500/stage/received", follow_redirects=True)
+    resp = client.post("/t/500/stage/received", data=RECEIVED, follow_redirects=True)
     assert b"nothing was sent or saved" in resp.data
     assert repair_db.get_rma(500)["stage"] == "queued"
     assert [e["kind"] for e in repair_db.events_for(500)] == ["added"]
@@ -352,7 +387,7 @@ def test_stage_sets_zendesk_field_when_configured(client, zd, tech, monkeypatch)
     repair_db.update_stage("received", stage["label"], stage["comment_body"], "rma_received")
     try:
         _add(client)
-        client.post("/t/500/stage/received")
+        client.post("/t/500/stage/received", data=RECEIVED)
         assert zd.updates[0]["custom_fields"] == {36000123: "rma_received"}
     finally:
         repair_db.update_stage("received", stage["label"], stage["comment_body"], None)
@@ -375,7 +410,7 @@ def test_ticket_page_offers_add_then_stages(client, zd, tech):
 def test_queue_board_shows_cards_by_stage(client, zd, tech):
     _add(client, 500)
     _add(client, 501)
-    client.post("/t/501/stage/received")
+    client.post("/t/501/stage/received", data=RECEIVED)
     resp = client.get("/queue")
     assert resp.status_code == 200
     cols = repair_db.board()
@@ -405,9 +440,9 @@ def test_quick_action_and_note_post_and_log(client, zd, tech):
 @needs_db
 def test_report_and_csv(client, zd, tech):
     _add(client)
-    client.post("/t/500/stage/received")
+    client.post("/t/500/stage/received", data=RECEIVED)
     trig = _choice("problem", "Trigger")
-    client.post("/t/500/stage/inspected", data={"problem_ids": [trig["id"]]})
+    client.post("/t/500/stage/inspected", data={**inspected(), "problem_ids": [trig["id"]]})
     client.post("/t/500/stage/shipped", data={"tracking_number": "1Z999AA10123456784"})
     today = repair_db_today()
     data = repair_db.report(today, today)
@@ -480,17 +515,17 @@ def test_settings_manage_people_and_lists(clean_db, client):
 def test_earlier_stage_needs_move_back_and_resets_later_times(client, zd, tech, monkeypatch):
     monkeypatch.setattr(portal_views, "DUPLICATE_WINDOW_SECONDS", 0)  # posts here are seconds apart
     _add(client)
-    client.post("/t/500/stage/received")
+    client.post("/t/500/stage/received", data=RECEIVED)
     trig = _choice("problem", "Trigger")
-    client.post("/t/500/stage/inspected", data={"problem_ids": [trig["id"]]})
+    client.post("/t/500/stage/inspected", data={**inspected(), "problem_ids": [trig["id"]]})
     client.post("/t/500/stage/shipped", data={"tracking_number": "1Z999AA10123456784"})
     sent = len(zd.updates)
 
-    resp = client.post("/t/500/stage/received", follow_redirects=True)
+    resp = client.post("/t/500/stage/received", data=RECEIVED, follow_redirects=True)
     assert b"already past" in resp.data and len(zd.updates) == sent  # no email without the tick
     assert repair_db.get_rma(500)["stage"] == "shipped"
 
-    client.post("/t/500/stage/received", data={"move_back": "1"})
+    client.post("/t/500/stage/received", data={**RECEIVED, "move_back": "1"})
     rma = repair_db.get_rma(500)
     assert len(zd.updates) == sent + 1
     assert rma["stage"] == "received"
@@ -502,10 +537,10 @@ def test_earlier_stage_needs_move_back_and_resets_later_times(client, zd, tech, 
 @needs_db
 def test_resending_current_stage_keeps_first_time(client, zd, tech, monkeypatch):
     _add(client)
-    client.post("/t/500/stage/received")
+    client.post("/t/500/stage/received", data=RECEIVED)
     first = repair_db.get_rma(500)["received_at"]
     monkeypatch.setattr(portal_views, "DUPLICATE_WINDOW_SECONDS", 0)
-    client.post("/t/500/stage/received")
+    client.post("/t/500/stage/received", data=RECEIVED)
     assert len(zd.updates) == 2
     assert repair_db.get_rma(500)["received_at"] == first
 
@@ -521,7 +556,7 @@ def test_simultaneous_double_tap_emails_once(client, zd, tech):
         with flask_app.test_client() as c:
             with c.session_transaction() as sess:
                 sess.update(saved)
-            c.post("/t/500/stage/received")
+            c.post("/t/500/stage/received", data=RECEIVED)
 
     threads = [threading.Thread(target=tap) for _ in range(2)]
     for t in threads:
@@ -539,10 +574,10 @@ def test_closed_ticket_stage_saved_without_email(client, zd, tech):
     resp = client.get("/t/500")
     assert b"without emailing" in resp.data
     zd.fail = True  # Zendesk refuses comments on closed tickets
-    client.post("/t/500/stage/received")
+    client.post("/t/500/stage/received", data=RECEIVED)
     assert repair_db.get_rma(500)["stage"] == "queued"
     zd.fail = False
-    client.post("/t/500/stage/received", data={"record_only": "1"})
+    client.post("/t/500/stage/received", data={**RECEIVED, "record_only": "1"})
     rma = repair_db.get_rma(500)
     ev = repair_db.events_for(500)[0]
     assert rma["stage"] == "received" and ev["customer_message"] is None
@@ -553,7 +588,7 @@ def test_closed_ticket_stage_saved_without_email(client, zd, tech):
 @needs_db
 def test_record_only_refused_for_open_ticket(client, zd, tech):
     _add(client)
-    resp = client.post("/t/500/stage/received", data={"record_only": "1"}, follow_redirects=True)
+    resp = client.post("/t/500/stage/received", data={**RECEIVED, "record_only": "1"}, follow_redirects=True)
     assert b"post the stage normally" in resp.data
     assert repair_db.get_rma(500)["stage"] == "queued"
 
@@ -578,7 +613,7 @@ def test_pin_lockout_after_repeated_misses(clean_db, client):
 @needs_db
 def test_deactivating_or_new_pin_signs_tech_out(client, zd, tech):
     repair_db.update_tech(tech["id"], "Kyler", active=True, new_pin="9999")
-    resp = client.post("/t/500/stage/received")
+    resp = client.post("/t/500/stage/received", data=RECEIVED)
     assert "/tech" in resp.headers["Location"]  # old sign-in no longer valid
     client.post("/tech", data={"tech_id": tech["id"], "pin": "9999"})
     _add(client)  # signed in again with the new PIN
@@ -616,7 +651,7 @@ def test_shared_secret_is_stable(migrated):
 @needs_db
 def test_queue_card_date_ignores_notes(client, zd, tech):
     _add(client)
-    client.post("/t/500/stage/received")
+    client.post("/t/500/stage/received", data=RECEIVED)
     with psycopg.connect(TEST_DSN, autocommit=True) as conn:
         conn.execute("UPDATE repair.rma SET received_at = now() - interval '20 days'")
     client.post("/t/500/action", data={"note": "still waiting", "note_visibility": "internal"})
@@ -634,10 +669,10 @@ def test_inspection_takes_several_problems_and_other(client, zd, tech):
     bolt = _choice("problem", "Bolt or action")
     client.post(
         "/t/500/stage/inspected",
-        data={"problem_ids": [trig["id"], bolt["id"]], "problem_other": "  Cracked   scope base "},
+        data={**inspected(), "problem_ids": [trig["id"], bolt["id"]], "problem_other": "  Cracked   scope base "},
     )
-    assert "found the following: Bolt or action, Trigger, Cracked scope base." in zd.updates[0]["body"] or \
-        "found the following: Trigger, Bolt or action, Cracked scope base." in zd.updates[0]["body"]
+    assert "Findings: Bolt or action, Trigger, Cracked scope base." in zd.updates[0]["body"] or \
+        "Findings: Trigger, Bolt or action, Cracked scope base." in zd.updates[0]["body"]
     rma = repair_db.get_rma(500)
     assert sorted(rma["problem_ids"]) == sorted([trig["id"], bolt["id"]])
     assert rma["problem_other"] == "Cracked scope base"
@@ -649,8 +684,8 @@ def test_inspection_takes_several_problems_and_other(client, zd, tech):
 @needs_db
 def test_other_alone_is_enough(client, zd, tech):
     _add(client)
-    client.post("/t/500/stage/inspected", data={"problem_other": "Muzzle brake loose"})
-    assert "found the following: Muzzle brake loose." in zd.updates[0]["body"]
+    client.post("/t/500/stage/inspected", data={**inspected(), "problem_other": "Muzzle brake loose"})
+    assert "Findings: Muzzle brake loose." in zd.updates[0]["body"]
 
 
 @needs_db
@@ -658,14 +693,14 @@ def test_other_can_be_added_to_the_list(client, zd, tech):
     _add(client)
     client.post(
         "/t/500/stage/inspected",
-        data={"problem_other": "Muzzle brake loose", "problem_add": "1"},
+        data={**inspected(), "problem_other": "Muzzle brake loose", "problem_add": "1"},
     )
     added = _choice("problem", "Muzzle brake loose")
     rma = repair_db.get_rma(500)
     assert rma["problem_ids"] == [added["id"]] and rma["problem_other"] is None
     # typing it again (any case) re-uses the same list item
     _add(client, 501)
-    client.post("/t/501/stage/inspected", data={"problem_other": "muzzle BRAKE loose", "problem_add": "1"})
+    client.post("/t/501/stage/inspected", data={**inspected(), "problem_other": "muzzle BRAKE loose", "problem_add": "1"})
     assert [c["label"].lower() for c in repair_db.list_choices("problem")].count("muzzle brake loose") == 1
     assert repair_db.get_rma(501)["problem_ids"] == [added["id"]]
 
@@ -695,9 +730,9 @@ def test_reposting_inspection_replaces_picks(client, zd, tech, monkeypatch):
     trig = _choice("problem", "Trigger")
     bolt = _choice("problem", "Bolt or action")
     sol = _choice("solution", "Adjusted trigger")
-    client.post("/t/500/stage/inspected", data={"problem_ids": [trig["id"], bolt["id"]]})
+    client.post("/t/500/stage/inspected", data={**inspected(), "problem_ids": [trig["id"], bolt["id"]]})
     client.post("/t/500/stage/repaired", data={"solution_ids": [sol["id"]]})
-    client.post("/t/500/stage/inspected", data={"problem_ids": [bolt["id"]], "move_back": "1"})
+    client.post("/t/500/stage/inspected", data={**inspected(), "problem_ids": [bolt["id"]], "move_back": "1"})
     rma = repair_db.get_rma(500)
     assert rma["problem_ids"] == [bolt["id"]]
     assert rma["solution_ids"] == [sol["id"]]  # the other list is untouched
@@ -713,7 +748,7 @@ def test_report_counts_each_pick_and_other_text(client, zd, tech):
         (502, {"problem_other": "scope base"}),
     ):
         _add(client, tid)
-        client.post(f"/t/{tid}/stage/inspected", data=data)
+        client.post(f"/t/{tid}/stage/inspected", data={**inspected(), **data})
     today = repair_db_today()
     counts = {r["label"]: r["n"] for r in repair_db.report(today, today)["problems"]}
     assert counts["Trigger"] == 2 and counts["Bolt or action"] == 1
@@ -728,6 +763,351 @@ def test_inactive_choice_cannot_be_ticked(client, zd, tech):
     _add(client)
     old = next(c for c in repair_db.list_choices("problem", include_inactive=True) if c["label"] == "Other")
     assert old["active"] is False  # the seeded "Other" item is replaced by the free-text box
-    resp = client.post("/t/500/stage/inspected", data={"problem_ids": [old["id"]]}, follow_redirects=True)
+    resp = client.post("/t/500/stage/inspected", data={**inspected(), "problem_ids": [old["id"]]}, follow_redirects=True)
     assert b"Tick at least one problem found" in resp.data
     assert zd.updates == []
+
+
+# ---------------------------------------------------------------- stage forms v2
+
+
+def _img(fmt="JPEG"):
+    import io
+
+    from PIL import Image
+
+    if fmt == "HEIF":
+        from pillow_heif import register_heif_opener
+
+        register_heif_opener()
+    buf = io.BytesIO()
+    Image.new("RGB", (8, 8), (200, 30, 30)).save(buf, fmt)
+    return buf.getvalue()
+
+
+def _file(name, data):
+    import io
+
+    return (io.BytesIO(data), name)
+
+
+@needs_db
+def test_received_lists_accessories_condition_and_photos(client, zd, tech):
+    _add(client)
+    scope = _choice("accessory", "Scope")
+    sling = _choice("accessory", "Sling")
+    resp = client.post(
+        "/t/500/stage/received",
+        data={"accessory_ids": [scope["id"], sling["id"]], "arrival_damage": "yes", "arrival_notes": ""},
+        follow_redirects=True,
+    )
+    assert b"Describe the damage" in resp.data and zd.updates == []
+    client.post(
+        "/t/500/stage/received",
+        data={
+            "accessory_ids": [scope["id"], sling["id"]],
+            "accessory_other": "Spare bolt",
+            "arrival_damage": "yes",
+            "arrival_notes": "Case latch broken in transit",
+            "files": [_file("rifle.jpg", _img()), _file("box.heic", _img("HEIF"))],
+        },
+        content_type="multipart/form-data",
+    )
+    u = zd.updates[0]
+    assert "Items received with it: Scope, Sling, Spare bolt." in u["body"]
+    assert "We noted the following on arrival: Case latch broken in transit." in u["body"]
+    names = [zd.uploaded[t][0] for t in u["uploads"]]
+    assert names == ["rifle.jpg", "box.jpg"]  # HEIC converted to JPEG
+    assert zd.uploaded[u["uploads"][1]][2] == "image/jpeg"
+    rma = repair_db.get_rma(500)
+    assert rma["arrival_damage"] is True and rma["accessory_summary"] == "Scope, Sling, Spare bolt"
+    assert repair_db.events_for(500)[0]["detail"]["files"] == ["rifle.jpg", "box.jpg"]
+
+
+@needs_db
+def test_received_without_damage_has_no_arrival_note(client, zd, tech):
+    _add(client)
+    client.post("/t/500/stage/received", data={"arrival_damage": "no"})
+    assert "Items received with it: none." in zd.updates[0]["body"]
+    assert "noted the following" not in zd.updates[0]["body"]
+
+
+@needs_db
+def test_unsupported_file_type_is_refused(client, zd, tech):
+    _add(client)
+    resp = client.post(
+        "/t/500/stage/received",
+        data={**RECEIVED, "files": [_file("run.exe", b"MZ")]},
+        content_type="multipart/form-data",
+        follow_redirects=True,
+    )
+    assert b"isn&#39;t a supported file type" in resp.data and zd.updates == []
+
+
+@needs_db
+def test_inspection_checklist_required_and_sent_to_customer(client, zd, tech):
+    _add(client)
+    trig = _choice("problem", "Trigger")
+    points = repair_db.list_choices("inspection_point")
+    assert len(points) == 11
+    partial = {f"point_{p['id']}": "ok" for p in points[:-1]}
+    resp = client.post(
+        "/t/500/stage/inspected",
+        data={**partial, "complaint_match": "yes", "problem_ids": [trig["id"]]},
+        follow_redirects=True,
+    )
+    assert b"Mark every inspection point" in resp.data and zd.updates == []
+
+    answers = {f"point_{p['id']}": "ok" for p in points}
+    trigger_point = next(p for p in points if p["label"].startswith("Trigger"))
+    answers[f"point_{trigger_point['id']}"] = "issue"
+    answers[f"point_note_{trigger_point['id']}"] = "creep, 6.5 lb"
+    answers[f"point_{points[-1]['id']}"] = "na"
+    client.post(
+        "/t/500/stage/inspected",
+        data={**answers, "complaint_match": "partly", "problem_ids": [trig["id"]]},
+    )
+    body = zd.updates[0]["body"]
+    assert "inspected your rifle (11-point inspection):" in body
+    assert "- Trigger: pull weight and function: Issue found (creep, 6.5 lb)" in body
+    assert "- Barrel: bore, crown and muzzle device: OK" in body
+    assert "Not applicable" in body and "Findings: Trigger." in body
+    rma = repair_db.get_rma(500)
+    assert rma["complaint_match"] == "partly" and len(rma["inspection"]) == 11
+    today = repair_db_today()
+    issues = repair_db.report(today, today)["point_issues"]
+    assert [(r["label"], r["n"]) for r in issues] == [(trigger_point["label"], 1)]
+
+
+@needs_db
+def test_inspection_needs_complaint_answer(client, zd, tech):
+    _add(client)
+    data = inspected()
+    data.pop("complaint_match")
+    resp = client.post("/t/500/stage/inspected", data={**data, "problem_other": "x"}, follow_redirects=True)
+    assert b"match the customer" in resp.data and zd.updates == []
+
+
+@needs_db
+def test_accuracy_pass_emails_customer(client, zd, tech):
+    _add(client)
+    client.post(
+        "/t/500/stage/tested",
+        data={"test_required": "yes", "test_result": "pass", "group_size": "0.75", "group_unit": "moa",
+              "test_distance": "100", "test_ammo": "Hornady 143gr ELD-X"},
+    )
+    u = zd.updates[0]
+    assert u["public"] is True and "0.75 MOA group at 100 yards with Hornady 143gr ELD-X" in u["body"]
+    assert u["tags"] == ["repair-portal", "rp-tested"]
+    rma = repair_db.get_rma(500)
+    assert rma["stage"] == "tested" and rma["test_result"] == "pass" and float(rma["group_size"]) == 0.75
+    assert [r["ticket_id"] for r in repair_db.board()["tested"]] == [500]
+
+
+@needs_db
+def test_accuracy_fail_is_internal_and_flags(client, zd, tech):
+    _add(client)
+    client.post(
+        "/t/500/stage/tested",
+        data={"test_required": "yes", "test_result": "fail", "group_size": "2.5", "group_unit": "in",
+              "test_distance": "100", "test_ammo": "Federal GMM"},
+    )
+    u = zd.updates[0]
+    assert u["public"] is False and "FAILED" in u["body"] and '2.5" at 100 yards' in u["body"]
+    rma = repair_db.get_rma(500)
+    assert rma["flag"] == "Failed accuracy test"
+    assert repair_db.events_for(500)[0]["customer_message"] is None
+
+
+@needs_db
+def test_accuracy_not_required_is_internal_and_clears_old_result(client, zd, tech, monkeypatch):
+    monkeypatch.setattr(portal_views, "DUPLICATE_WINDOW_SECONDS", 0)
+    _add(client)
+    client.post(
+        "/t/500/stage/tested",
+        data={"test_required": "yes", "test_result": "pass", "group_size": "0.8", "group_unit": "moa",
+              "test_distance": "100", "test_ammo": "Federal GMM"},
+    )
+    client.post("/t/500/stage/tested", data={"test_required": "no"})
+    u = zd.updates[1]
+    assert u["public"] is False and "not required" in u["body"]
+    assert u["tags"] == ["repair-portal", "rp-tested"]  # Zendesk views/stage field still see the stage
+    rma = repair_db.get_rma(500)
+    assert rma["stage"] == "tested" and rma["test_required"] is False
+    assert rma["group_size"] is None and rma["test_ammo"] is None and rma["test_distance"] is None
+
+
+@needs_db
+def test_accuracy_validates_numbers(client, zd, tech):
+    _add(client)
+    base = {"test_required": "yes", "test_result": "pass", "group_unit": "moa", "test_ammo": "x"}
+    resp = client.post("/t/500/stage/tested", data={**base, "group_size": "abc"}, follow_redirects=True)
+    assert b"Enter the group size" in resp.data
+    resp = client.post("/t/500/stage/tested", data={**base, "group_size": "1", "test_ammo": ""}, follow_redirects=True)
+    assert b"ammunition" in resp.data
+    assert zd.updates == []
+
+
+@needs_db
+def test_other_updates_flag_and_clear(client, zd, tech, monkeypatch):
+    monkeypatch.setattr(portal_views, "DUPLICATE_WINDOW_SECONDS", 0)
+    _add(client)
+    parts = next(a for a in db.list_quick_actions() if a["label"] == "Awaiting parts")
+    client.post("/t/500/action", data={"action_id": parts["id"], "note": "Barrel on order, ETA Dec 5",
+                                        "note_visibility": "public"})
+    u = zd.updates[0]
+    assert u["public"] is True and "waiting on parts" in u["body"] and "ETA Dec 5" not in u["body"]
+    assert zd.updates[1]["public"] is True and zd.updates[1]["body"] == "Barrel on order, ETA Dec 5"
+    assert repair_db.get_rma(500)["flag"] == "Awaiting parts"
+    assert b"Awaiting parts" in client.get("/queue").data
+    client.post("/t/500/clear-flag")
+    assert repair_db.get_rma(500)["flag"] is None
+    client.post("/t/500/action", data={"action_id": parts["id"]})
+    client.post("/t/500/stage/received", data=RECEIVED)  # posting a stage clears the flag too
+    assert repair_db.get_rma(500)["flag"] is None
+
+
+@needs_db
+def test_internal_update_button_and_file_only_note(client, zd, tech):
+    _add(client)
+    review = next(a for a in db.list_quick_actions() if a["label"] == "Under review")
+    db.update_quick_action(review["id"], review["label"], review["comment_body"], review["tag"],
+                           review["position"], True, public=False)
+    client.post("/t/500/action", data={"action_id": review["id"]})
+    assert zd.updates[0]["public"] is False
+    client.post(
+        "/t/500/action",
+        data={"note_visibility": "internal", "files": [_file("parts.pdf", b"%PDF-1.4 test")]},
+        content_type="multipart/form-data",
+    )
+    assert zd.updates[1]["uploads"] and zd.updates[1]["public"] is False
+
+
+@needs_db
+def test_video_link(client, zd, tech):
+    _add(client)
+    resp = client.post("/t/500/stage/received", data={**RECEIVED, "video_url": "not a url"}, follow_redirects=True)
+    assert b"video link" in resp.data and zd.updates == []
+    client.post("/t/500/stage/received", data={**RECEIVED, "video_url": "https://youtu.be/abc123"})
+    assert zd.updates[0]["body"].endswith("Video: https://youtu.be/abc123")
+    assert b"https://youtu.be/abc123" in client.get("/t/500").data
+
+
+@needs_db
+def test_gallery_and_file_proxy(client, zd, tech):
+    _add(client)
+    client.post(
+        "/t/500/stage/received",
+        data={**RECEIVED, "files": [_file("rifle.jpg", _img()), _file("report.xlsx", b"PK\x03\x04xx")]},
+        content_type="multipart/form-data",
+    )
+    page = client.get("/t/500").data
+    assert b"rifle.jpg" in page and b"report.xlsx" in page and b"Customer's complaint" in page
+    att = zd.comments[500][0]["attachments"]
+    img = client.get(f"/t/500/file/{att[0]['id']}")
+    assert img.status_code == 200 and img.mimetype == "image/jpeg"
+    assert img.headers["Content-Disposition"].startswith("inline")
+    assert img.headers["Content-Security-Policy"] == "sandbox"
+    assert img.headers["Cache-Control"] == "no-store"
+    xls = client.get(f"/t/500/file/{att[1]['id']}")
+    assert xls.headers["Content-Disposition"].startswith("attachment")
+    assert xls.mimetype == "application/octet-stream"
+    assert client.get("/t/500/file/123456").status_code == 404
+    client.post("/tech/signout")
+    assert client.get(f"/t/500/file/{att[0]['id']}").status_code == 403
+
+
+def test_initials_filter():
+    import app as app_module
+
+    assert app_module.initials("Kyler Smith") == "KS"
+    assert app_module.initials("Brooklyn") == "BR"
+    assert app_module.initials("") == ""
+
+
+@needs_db
+def test_settings_lists_include_inspection_and_accessories(clean_db, client):
+    page = client.get("/admin/").data
+    assert b"Inspection checklist" in page and b"Items received with it" in page
+    client.post("/admin/choice", data={"op": "create", "kind": "inspection_point", "label": "Headspace check"})
+    assert any(c["label"] == "Headspace check" for c in repair_db.list_choices("inspection_point"))
+    client.post("/admin/choice", data={"op": "create", "kind": "bogus", "label": "x"})
+    assert not any(c["label"] == "x" for k in repair_db.CHOICE_KINDS for c in repair_db.list_choices(k))
+
+
+
+# ---------------------------------------------------------------- review fixes (v2)
+
+
+@needs_db
+def test_internal_note_with_public_button_stays_internal(client, zd, tech):
+    _add(client)
+    hold = next(a for a in db.list_quick_actions() if a["label"] == "On hold")
+    client.post("/t/500/action", data={"action_id": hold["id"], "note": "Customer owes $85, do not ship",
+                                        "note_visibility": "internal"})
+    assert zd.updates[0]["public"] is True and "do not ship" not in zd.updates[0]["body"]
+    assert zd.updates[1]["public"] is False and "do not ship" in zd.updates[1]["body"]
+
+
+@needs_db
+def test_failed_test_blocks_shipping_without_override(client, zd, tech):
+    _add(client)
+    client.post(
+        "/t/500/stage/tested",
+        data={"test_required": "yes", "test_result": "fail", "group_size": "3", "group_unit": "moa",
+              "test_distance": "100", "test_ammo": "Federal GMM"},
+    )
+    page = client.get("/t/500").data
+    assert b"Ship anyway" in page
+    resp = client.post("/t/500/stage/shipped", data={"tracking_number": "1Z999AA10123456784"},
+                       follow_redirects=True)
+    assert b"failed its accuracy test" in resp.data and len(zd.updates) == 1
+    client.post("/t/500/stage/shipped", data={"tracking_number": "1Z999AA10123456784", "ship_failed": "1"})
+    assert repair_db.get_rma(500)["stage"] == "shipped" and len(zd.updates) == 2
+
+
+@needs_db
+def test_add_to_list_rolls_back_when_zendesk_refuses(client, zd, tech):
+    _add(client)
+    zd.fail = True
+    client.post("/t/500/stage/inspected",
+                data={**inspected(), "problem_other": "Cracked recoil lug", "problem_add": "1"})
+    assert not any(c["label"] == "Cracked recoil lug" for c in repair_db.list_choices("problem"))
+    zd.fail = False
+    client.post("/t/500/stage/inspected",
+                data={**inspected(), "problem_other": "Cracked recoil lug", "problem_add": "1"})
+    added = _choice("problem", "Cracked recoil lug")
+    assert repair_db.get_rma(500)["problem_ids"] == [added["id"]]
+    assert "Findings: Cracked recoil lug." in zd.updates[0]["body"]
+
+
+@needs_db
+def test_empty_inspection_checklist_is_refused(client, zd, tech):
+    _add(client)
+    points = repair_db.list_choices("inspection_point")
+    try:
+        for p in points:
+            repair_db.update_choice(p["id"], p["label"], p["position"], False)
+        resp = client.post("/t/500/stage/inspected", data={"complaint_match": "yes", "problem_other": "x"},
+                           follow_redirects=True)
+        assert b"inspection checklist is empty" in resp.data and zd.updates == []
+    finally:
+        for p in points:
+            repair_db.update_choice(p["id"], p["label"], p["position"], True)
+
+
+@needs_db
+def test_file_proxy_reuses_the_page_lookup(client, zd, tech, monkeypatch):
+    _add(client)
+    client.post(
+        "/t/500/stage/received",
+        data={**RECEIVED, "files": [_file("a.jpg", _img()), _file("b.jpg", _img())]},
+        content_type="multipart/form-data",
+    )
+    calls = []
+    real = zd.get_comments
+    monkeypatch.setattr(zd, "get_comments", lambda tid: calls.append(tid) or real(tid))
+    client.get("/t/500")
+    for a in zd.comments[500][0]["attachments"]:
+        assert client.get(f"/t/500/file/{a['id']}").status_code == 200
+    assert calls == [500]  # one listing for the page; thumbnails come from the cache

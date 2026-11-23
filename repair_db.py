@@ -18,7 +18,7 @@ from werkzeug.security import check_password_hash, generate_password_hash
 
 from db import _conn
 
-STAGE_KEYS = ("received", "inspected", "repaired", "shipped")
+STAGE_KEYS = ("received", "inspected", "repaired", "tested", "shipped")
 # Board columns in order; "queued" = added from Incoming, not yet received.
 BOARD_STAGES = ("queued",) + STAGE_KEYS
 _STAGE_TS = {k: f"{k}_at" for k in STAGE_KEYS}
@@ -88,16 +88,25 @@ def get_active_choices(choice_ids: list[int], kind: str) -> list[dict[str, Any]]
         ).fetchall()
 
 
-def ensure_choice(kind: str, label: str) -> dict[str, Any]:
-    """Add a list item (a tech's "Other" text), or reuse and re-activate a match."""
-    with _conn() as conn:
-        return conn.execute(
-            "INSERT INTO repair.choice (kind, label, position) VALUES (%s, %s, "
-            "  (SELECT COALESCE(MAX(position), 0) + 10 FROM repair.choice WHERE kind = %s)) "
-            "ON CONFLICT (kind, lower(label)) DO UPDATE SET active = true "
-            "RETURNING id, kind, label, position, active",
-            (kind, label, kind),
-        ).fetchone()
+def ensure_choice(kind: str, label: str, conn: psycopg.Connection | None = None) -> dict[str, Any]:
+    """Add a list item (a tech's "Other" text), or reuse and re-activate a match.
+
+    Pass the ``ticket_lock`` connection so the addition rolls back with the post.
+    """
+    if conn is not None:
+        return _ensure_choice(conn, kind, label)
+    with _conn() as c:
+        return _ensure_choice(c, kind, label)
+
+
+def _ensure_choice(conn: psycopg.Connection, kind: str, label: str) -> dict[str, Any]:
+    return conn.execute(
+        "INSERT INTO repair.choice (kind, label, position) VALUES (%s, %s, "
+        "  (SELECT COALESCE(MAX(position), 0) + 10 FROM repair.choice WHERE kind = %s)) "
+        "ON CONFLICT (kind, lower(label)) DO UPDATE SET active = true "
+        "RETURNING id, kind, label, position, active",
+        (kind, label, kind),
+    ).fetchone()
 
 
 def create_choice(kind: str, label: str) -> None:
@@ -216,9 +225,21 @@ def _picked(kind: str) -> str:
     )
 
 
-CHOICE_KINDS = ("problem", "solution")
+CHOICE_KINDS = ("problem", "solution", "accessory", "inspection_point")
 
-_RMA_SELECT = f"SELECT r.*, {_picked('problem')}, {_picked('solution')} FROM repair.rma r "
+_RMA_SELECT = (
+    f"SELECT r.*, {_picked('problem')}, {_picked('solution')}, {_picked('accessory')} "
+    "FROM repair.rma r "
+)
+
+# Form columns a stage may write (everything else in ``fields`` is ignored).
+STAGE_COLUMNS = {
+    "accessory_other", "arrival_damage", "arrival_notes",
+    "problem_other", "problem_notes", "inspection", "complaint_match",
+    "solution_other", "work_done",
+    "test_required", "test_result", "group_size", "group_unit", "test_distance", "test_ammo",
+    "tracking_number", "flag",
+}
 
 
 def get_rma(ticket_id: int) -> Optional[dict[str, Any]]:
@@ -294,6 +315,7 @@ def record_stage(
     fields: dict[str, Any],
     customer_message: str | None,
     current_stage: str,
+    extra: dict[str, Any] | None = None,
 ) -> None:
     """Move the RMA to a stage, save that stage's form answers, and log the event.
 
@@ -307,8 +329,9 @@ def record_stage(
     key = stage["key"]
     if key not in STAGE_KEYS:
         raise ValueError(f"unknown stage {key!r}")
-    allowed = {"problem_other", "problem_notes", "solution_other", "work_done", "tracking_number"}
-    cols = {k: v for k, v in fields.items() if k in allowed}
+    cols = {k: v for k, v in fields.items() if k in STAGE_COLUMNS}
+    # Posting a stage clears any "Other update" flag unless the stage sets one.
+    cols.setdefault("flag", None)
     picks = fields.get("picks")  # (kind, [choice ids]) for the inspection / repair forms
     moving_back = stage_index(key) < stage_index(current_stage)
     ts = _STAGE_TS[key]
@@ -325,12 +348,15 @@ def record_stage(
             sets.append("tracking_number = NULL")
     for col, val in cols.items():
         sets.append(f"{col} = %s")
-        params.append(val)
+        params.append(Jsonb(val) if isinstance(val, (list, dict)) else val)
+    sets.append("flag_at = CASE WHEN %s::text IS NULL THEN NULL ELSE now() END")
+    params.append(cols["flag"])
     params.append(ticket_id)
     conn.execute(f"UPDATE repair.rma SET {', '.join(sets)} WHERE ticket_id = %s", params)
-    detail = dict(cols)
+    detail = {k: (float(v) if hasattr(v, "as_integer_ratio") and not isinstance(v, (int, bool)) else v)
+              for k, v in cols.items() if v is not None}
     if picks:
-        kind, ids = picks
+        kind, ids = picks[0], picks[1]
         if kind not in CHOICE_KINDS:
             raise ValueError(f"unknown list {kind!r}")
         conn.execute(
@@ -349,6 +375,7 @@ def record_stage(
         detail["moved_back_from"] = current_stage
     if customer_message is None:
         detail["not_emailed"] = True
+    detail.update(extra or {})
     conn.execute(
         "INSERT INTO repair.event "
         "(ticket_id, kind, stage, label, tech_id, tech_name, detail, customer_message) "
@@ -363,6 +390,16 @@ def record_stage(
             customer_message,
         ),
     )
+
+
+def set_flag(ticket_id: int, label: str | None) -> None:
+    """Show an "Other update" (Awaiting parts, On hold...) on the queue card."""
+    with _conn() as conn:
+        conn.execute(
+            "UPDATE repair.rma SET flag = %s, flag_at = CASE WHEN %s::text IS NULL THEN NULL ELSE now() END "
+            "WHERE ticket_id = %s",
+            (label, label, ticket_id),
+        )
 
 
 def record_event(
@@ -474,6 +511,34 @@ def report(start, end) -> dict[str, Any]:
         ).fetchone()
         problems = conn.execute(_choice_counts("problem", "inspected_at"), rng * 3).fetchall()
         solutions = conn.execute(_choice_counts("solution", "repaired_at"), rng * 3).fetchall()
+        accuracy = conn.execute(
+            "SELECT count(*) FILTER (WHERE test_required) AS tested, "
+            "  count(*) FILTER (WHERE test_required AND test_result = 'pass') AS passed, "
+            "  count(*) FILTER (WHERE test_required AND test_result = 'fail') AS failed, "
+            "  count(*) FILTER (WHERE test_required IS FALSE) AS not_required, "
+            "  avg(group_size) FILTER (WHERE test_result = 'pass' AND group_unit = 'moa') AS avg_moa, "
+            "  avg(group_size) FILTER (WHERE test_result = 'pass' AND group_unit = 'in') AS avg_in "
+            f"FROM repair.rma WHERE {_local_date('tested_at')} BETWEEN %s AND %s",
+            rng,
+        ).fetchone()
+        complaint = conn.execute(
+            "SELECT complaint_match AS answer, count(*) AS n FROM repair.rma "
+            f"WHERE {_local_date('inspected_at')} BETWEEN %s AND %s AND complaint_match IS NOT NULL "
+            "GROUP BY 1",
+            rng,
+        ).fetchall()
+        point_issues = conn.execute(
+            "SELECT p->>'label' AS label, count(*) AS n "
+            "FROM repair.rma r, jsonb_array_elements(COALESCE(r.inspection, '[]'::jsonb)) p "
+            f"WHERE {_local_date('r.inspected_at')} BETWEEN %s AND %s AND p->>'result' = 'issue' "
+            "GROUP BY 1 ORDER BY n DESC, label",
+            rng,
+        ).fetchall()
+        arrivals = conn.execute(
+            "SELECT count(*) AS received, count(*) FILTER (WHERE arrival_damage) AS damaged "
+            f"FROM repair.rma WHERE {_local_date('received_at')} BETWEEN %s AND %s",
+            rng,
+        ).fetchone()
         by_tech = conn.execute(
             "SELECT COALESCE(tech_name, '(unknown)') AS tech, COALESCE(stage, kind) AS stage, "
             "count(*) AS n FROM repair.event "
@@ -494,6 +559,10 @@ def report(start, end) -> dict[str, Any]:
         "problems": problems,
         "solutions": solutions,
         "techs": techs,
+        "accuracy": accuracy,
+        "complaint": {r["answer"]: r["n"] for r in complaint},
+        "point_issues": point_issues,
+        "arrivals": arrivals,
     }
 
 
@@ -508,7 +577,9 @@ def export_rmas(start, end) -> tuple[list[str], list[dict[str, Any]]]:
             "SELECT r.ticket_id, r.subject, r.requester_name, r.requester_email, r.stage, "
             "r.added_by, r.added_at, r.received_at, r.inspected_at, r.repaired_at, r.shipped_at, "
             "x.problem_summary AS problems, r.problem_notes, x.solution_summary AS solutions, "
-            "r.work_done, r.tracking_number "
+            "r.work_done, x.accessory_summary AS accessories, r.arrival_damage, r.arrival_notes, "
+            "r.complaint_match, r.tested_at, r.test_required, r.test_result, r.group_size, "
+            "r.group_unit, r.test_distance, r.test_ammo, r.tracking_number, r.flag "
             f"FROM repair.rma r JOIN ({_RMA_SELECT}) x ON x.ticket_id = r.ticket_id "
             f"WHERE {_local_date('r.added_at')} BETWEEN %s AND %s "
             f"   OR {_local_date('r.updated_at')} BETWEEN %s AND %s "

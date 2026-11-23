@@ -30,6 +30,7 @@ from admin_views import admin_bp
 from portal_views import portal_bp
 from report_views import report_bp
 
+app.config["MAX_CONTENT_LENGTH"] = 120 * 1024 * 1024  # several phone photos per post
 app.register_blueprint(portal_bp)
 app.register_blueprint(admin_bp)
 app.register_blueprint(report_bp)
@@ -87,6 +88,24 @@ def datefmt(value):
     except ValueError:
         return value
     return parsed.strftime("%b %d, %Y %H:%M UTC")
+
+
+@app.template_filter("initials")
+def initials(name):
+    """'Kyler Smith' -> 'KS'; a single name keeps its first two letters."""
+    parts = [p for p in re.split(r"[\s.\-]+", name or "") if p]
+    if not parts:
+        return ""
+    if len(parts) == 1:
+        return parts[0][:2].upper()
+    return (parts[0][0] + parts[-1][0]).upper()
+
+
+@app.errorhandler(413)
+def too_large(_exc):
+    return render_template(
+        "error.html", ticket_id=None, message="Those files are too big to upload together (120 MB max). Attach fewer at a time."
+    ), 413
 
 
 @app.template_filter("localtime")

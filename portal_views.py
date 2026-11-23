@@ -11,10 +11,11 @@ import logging
 import os
 import re
 
-from flask import Blueprint, flash, redirect, render_template, request, url_for
+from flask import Blueprint, Response, abort, flash, redirect, render_template, request, url_for
 
 import auth
 import db
+import files
 import repair_db
 from zendesk_client import ZendeskClient, ZendeskError
 
@@ -221,39 +222,59 @@ def add_to_queue(ticket_id):
 
 @portal_bp.route("/t/<int:ticket_id>")
 def action_page(ticket_id):
+    zendesk = _get_zendesk()
     try:
-        ticket, requester, _org = _get_zendesk().get_ticket(ticket_id)
+        ticket, requester, _org = zendesk.get_ticket(ticket_id)
     except ZendeskError as exc:
         status = 404 if exc.status == 404 else 502
         return render_template("error.html", ticket_id=ticket_id, message=str(exc)), status
 
+    tech = auth.current_tech()
     ctx = {
         "ticket": ticket,
         "requester": requester,
+        "complaint": (ticket.get("description") or "").strip(),
         "agent_url": _agent_url(ticket_id),
         "base_tag": portal_tag(),
-        "tech": auth.current_tech(),
+        "tech": tech,
         "db_error": None,
         "rma": None,
         "stages": [],
-        "problems": [],
-        "solutions": [],
+        "lists": {},
         "actions": [],
         "history": [],
         "legacy_history": [],
+        "gallery": [],
+        "gallery_error": None,
+        "accept": files.ACCEPT_ATTR,
+        "stage_by": {},
     }
     if not db.available():
         ctx["db_error"] = "Database not configured. Stage buttons are unavailable."
         return render_template("portal/action.html", **ctx)
 
+    # Photos and files on the ticket (signed-in staff only: they can include customer documents).
+    if tech:
+        try:
+            comments, users = zendesk.get_comments(ticket_id)
+            files.remember(ticket_id, comments)
+            ctx["gallery"] = files.gallery(comments, users)
+        except ZendeskError as exc:
+            ctx["gallery_error"] = f"Couldn't load the ticket's files from Zendesk: {exc}"
+
     rma = repair_db.get_rma(ticket_id)
+    history = repair_db.events_for(ticket_id) if rma else []
+    stage_by = {}
+    for e in reversed(history):  # who last posted each stage
+        if e["kind"] == "stage":
+            stage_by[e["stage"]] = e["tech_name"]
     ctx.update(
         rma=rma,
         stages=repair_db.list_stages(),
-        problems=repair_db.list_choices("problem"),
-        solutions=repair_db.list_choices("solution"),
+        lists={k: repair_db.list_choices(k) for k in repair_db.CHOICE_KINDS},
         actions=db.list_quick_actions(),
-        history=repair_db.events_for(ticket_id) if rma else [],
+        history=history,
+        stage_by=stage_by,
         legacy_history=db.recent_actions(ticket_id),
         next_stage=_next_stage(rma["stage"]) if rma else None,
         current_index=repair_db.stage_index(rma["stage"]) if rma else -1,
@@ -268,6 +289,203 @@ def _next_stage(current):
         return None
     i = order.index(current)
     return order[i + 1] if i + 1 < len(order) else None
+
+
+@portal_bp.route("/t/<int:ticket_id>/file/<int:file_id>")
+def ticket_file(ticket_id, file_id):
+    """Serve one of the ticket's Zendesk attachments (or a thumbnail) to signed-in staff."""
+    if auth.current_tech() is None:
+        abort(403)
+    zendesk = _get_zendesk()
+    try:
+        att = files.cached_attachment(ticket_id, file_id)
+        if att is None:  # not seen recently: list the ticket's comments once and remember them
+            comments, _users = zendesk.get_comments(ticket_id)
+            files.remember(ticket_id, comments)
+            att = files.find_attachment(comments, file_id)
+        if att is None:
+            abort(404)
+        data, ctype = zendesk.download(att["content_url"])
+    except ZendeskError as exc:
+        return Response(str(exc), status=502, mimetype="text/plain")
+    ctype = (att.get("content_type") or ctype or "application/octet-stream").split(";")[0].lower()
+    name = re.sub(r'[^A-Za-z0-9._ -]+', "_", att.get("file_name") or "file")
+    inline = ctype in files.INLINE_IMAGE_TYPES  # PDFs and the rest download (a sandboxed PDF won't render)
+    resp = Response(data, mimetype=ctype if inline else "application/octet-stream")
+    resp.headers["Content-Disposition"] = f'{"inline" if inline else "attachment"}; filename="{name}"'
+    resp.headers["X-Content-Type-Options"] = "nosniff"
+    resp.headers["Content-Security-Policy"] = "sandbox"  # never run anything a customer uploaded
+    resp.headers["Cache-Control"] = "no-store"  # shared shop devices: nothing stays after sign-out
+    return resp
+
+
+def _base_values(rma):
+    """Placeholders from earlier stages, so any message can use them."""
+    group = ""
+    if rma.get("group_size") is not None:
+        size = f"{float(rma['group_size']):g}"
+        group = f"{size} MOA" if rma.get("group_unit") == "moa" else f'{size}"'
+    return {
+        "accessories": rma.get("accessory_summary") or "none",
+        "arrival_note": "",
+        "problem": rma.get("problem_summary") or "",
+        "solution": rma.get("solution_summary") or "",
+        "work_done": rma.get("work_done") or rma.get("solution_summary") or "",
+        "inspection": _inspection_text(rma.get("inspection") or []),
+        "points": str(len(rma.get("inspection") or [])),
+        "group": group,
+        "distance": str(rma.get("test_distance") or ""),
+        "ammo": rma.get("test_ammo") or "",
+        "tracking": rma.get("tracking_number") or "",
+    }
+
+
+RESULT_WORDS = {"ok": "OK", "issue": "Issue found", "na": "Not applicable"}
+
+
+def _inspection_text(points):
+    lines = []
+    for p in points:
+        line = f"- {p['label']}: {RESULT_WORDS.get(p['result'], p['result'])}"
+        if p.get("note"):
+            line += f" ({p['note']})"
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def _read_inspection(form):
+    """Every active checklist point must be marked OK, Issue or N/A."""
+    points = []
+    active = repair_db.list_choices("inspection_point")
+    if not active:
+        return "The inspection checklist is empty. Add points under Settings first."
+    for p in active:
+        result = form.get(f"point_{p['id']}")
+        if result not in RESULT_WORDS:
+            return f"Mark every inspection point (OK, Issue or N/A). “{p['label']}” is missing."
+        note = " ".join((form.get(f"point_note_{p['id']}") or "").split())[:200]
+        points.append({"id": p["id"], "label": p["label"], "result": result, "note": note or None})
+    return points
+
+
+def _read_stage_form(key, form, rma):
+    """Validate one stage's form. Returns (fields, values, mode, internal message) or an error string.
+
+    mode: "public" emails the customer; "internal" posts a Zendesk internal note;
+    "none" records the stage without a Zendesk post.
+    """
+    fields, values, mode, internal = {}, {}, "public", None
+    if key == "received":
+        picked = _read_picks(form, "accessory", required=False)
+        if isinstance(picked, str):
+            return picked
+        ids, other, summary, add = picked
+        damage = form.get("arrival_damage")
+        if damage not in ("yes", "no"):
+            return "Answer: any damage or shipping issues?"
+        notes = " ".join((form.get("arrival_notes") or "").split())[:500] or None
+        if damage == "yes" and not notes:
+            return "Describe the damage or shipping issue."
+        fields = {
+            "picks": ("accessory", ids, add),
+            "accessory_other": other,
+            "arrival_damage": damage == "yes",
+            "arrival_notes": notes,
+        }
+        values = {
+            "accessories": summary or "none",
+            "arrival_note": (
+                f" We noted the following on arrival: {notes}. Our team will reach out if anything needs your attention."
+                if damage == "yes"
+                else ""
+            ),
+        }
+    elif key == "inspected":
+        points = _read_inspection(form)
+        if isinstance(points, str):
+            return points
+        match = form.get("complaint_match")
+        if match not in ("yes", "partly", "no"):
+            return "Answer: does what you found match the customer's complaint?"
+        picked = _read_picks(form, "problem")
+        if isinstance(picked, str):
+            return picked
+        ids, other, summary, add = picked
+        fields = {
+            "picks": ("problem", ids, add),
+            "problem_other": other,
+            "problem_notes": (form.get("problem_notes") or "").strip() or None,
+            "inspection": points,
+            "complaint_match": match,
+        }
+        values = {"problem": summary, "inspection": _inspection_text(points), "points": str(len(points))}
+    elif key == "repaired":
+        picked = _read_picks(form, "solution")
+        if isinstance(picked, str):
+            return picked
+        ids, other, summary, add = picked
+        work_done = (form.get("work_done") or "").strip()
+        fields = {"picks": ("solution", ids, add), "solution_other": other, "work_done": work_done or None}
+        values = {"solution": summary, "work_done": work_done or summary}
+    elif key == "tested":
+        required = form.get("test_required")
+        if required not in ("yes", "no"):
+            return "Answer: is an accuracy test required for this rifle?"
+        if required == "no":
+            cleared = {"test_required": False, "test_result": None, "group_size": None,
+                       "group_unit": None, "test_distance": None, "test_ammo": None}
+            return cleared, {}, "internal", "Accuracy test: not required for this rifle. Customer not emailed."
+        result = form.get("test_result")
+        if result not in ("pass", "fail"):
+            return "Pick the test result: pass or fail."
+        try:
+            group = float(form.get("group_size") or "")
+        except ValueError:
+            group = 0.0
+        if not 0 < group <= 20:
+            return "Enter the group size (a number, e.g. 0.75)."
+        unit = form.get("group_unit") if form.get("group_unit") in ("moa", "in") else "moa"
+        try:
+            distance = int(form.get("test_distance") or 100)
+        except ValueError:
+            distance = 0
+        if not 10 <= distance <= 2000:
+            return "Enter the test distance in yards."
+        ammo = " ".join((form.get("test_ammo") or "").split())[:120]
+        if not ammo:
+            return "Enter the ammunition used."
+        size = f"{group:g}"
+        group_text = f"{size} MOA" if unit == "moa" else f'{size}"'
+        fields = {
+            "test_required": True,
+            "test_result": result,
+            "group_size": group,
+            "group_unit": unit,
+            "test_distance": distance,
+            "test_ammo": ammo,
+        }
+        values = {"group": group_text, "distance": str(distance), "ammo": ammo}
+        if result == "fail":
+            mode = "internal"
+            fields["flag"] = "Failed accuracy test"
+            internal = (
+                f"Accuracy test FAILED: {group_text} at {distance} yards with {ammo}. "
+                "Customer not emailed."
+            )
+    elif key == "shipped":
+        if rma.get("test_required") and rma.get("test_result") == "fail" and form.get("ship_failed") != "1":
+            return ("This rifle failed its accuracy test. Re-test it, or tick "
+                    "“Ship anyway” if a manager approved shipping it as is.")
+        tracking = (form.get("tracking_number") or "").strip()
+        if not TRACKING_RE.match(tracking):
+            return "Scan or type the return tracking number."
+        fields = {"tracking_number": tracking}
+        values = {"tracking": tracking}
+    return fields, values, mode, internal
+
+
+def _with_video(body, video):
+    return f"{body}\n\nVideo: {video}" if video else body
 
 
 @portal_bp.route("/t/<int:ticket_id>/stage/<key>", methods=["POST"])
@@ -298,45 +516,26 @@ def post_stage(ticket_id, key):
         return _back(ticket_id)
     record_only = form.get("record_only") == "1"
 
-    fields, values = {}, {}
-    if key in ("inspected", "repaired"):
-        kind = "problem" if key == "inspected" else "solution"
-        picked = _read_picks(form, kind)
-        if isinstance(picked, str):
-            flash(picked, "error")
-            return _back(ticket_id)
-        ids, other, summary = picked
-        fields = {"picks": (kind, ids), f"{kind}_other": other}
-        values = {kind: summary}
-        if key == "inspected":
-            fields["problem_notes"] = (form.get("problem_notes") or "").strip() or None
-        else:
-            work_done = (form.get("work_done") or "").strip()
-            fields["work_done"] = work_done or None
-            values["work_done"] = work_done or summary
-    elif key == "shipped":
-        tracking = (form.get("tracking_number") or "").strip()
-        if not TRACKING_RE.match(tracking):
-            flash("Scan or type the return tracking number.", "error")
-            return _back(ticket_id)
-        fields = {"tracking_number": tracking}
-        values = {"tracking": tracking}
+    uploads, upload_error = files.read_uploads(request.files.getlist("files"))
+    video = files.clean_video_url(form.get("video_url"))
+    if upload_error or video is False:
+        flash(upload_error or "That video link doesn't look like a web address (https://…).", "error")
+        return _back(ticket_id)
 
-    # Placeholders from earlier stages stay available to later messages.
-    values.setdefault("problem", rma.get("problem_summary") or "")
-    values.setdefault("solution", rma.get("solution_summary") or "")
-    values.setdefault("work_done", rma.get("work_done") or rma.get("solution_summary") or "")
-    values.setdefault("tracking", rma.get("tracking_number") or "")
-
-    message = render_message(stage["comment_body"], values)
-    custom_fields = {}
-    if stage_field_id() and stage.get("zendesk_value"):
-        custom_fields[stage_field_id()] = stage["zendesk_value"]
+    parsed = _read_stage_form(key, form, rma)
+    if isinstance(parsed, str):
+        flash(parsed, "error")
+        return _back(ticket_id)
+    fields, values, mode, internal = parsed
+    values = {**_base_values(rma), **values}
 
     zendesk = _get_zendesk()
     if record_only:
         # Only for tickets Zendesk has closed (no comments allowed): keep the
         # repair record moving and tell CS to contact the customer another way.
+        if uploads or video:
+            flash("Zendesk won't take files on a closed ticket. Save the stage without them.", "error")
+            return _back(ticket_id)
         try:
             ticket, _req, _org = zendesk.get_ticket(ticket_id)
         except ZendeskError as exc:
@@ -345,8 +544,25 @@ def post_stage(ticket_id, key):
         if ticket.get("status") != "closed":
             flash("This ticket is open in Zendesk, so post the stage normally.", "error")
             return _back(ticket_id)
+        mode = "none"
 
-    emailed = False
+    if mode == "public":
+        body = _with_video(render_message(stage["comment_body"], values), video)
+    elif mode == "internal":
+        body = _with_video(internal, video)
+    elif uploads or video:  # nothing to tell the customer, but keep the files on the ticket
+        mode, body = "internal", _with_video(f"{stage['label']}: recorded by {tech['name']}.", video)
+    else:
+        body = None
+
+    custom_fields = {}
+    if stage_field_id() and stage.get("zendesk_value"):
+        custom_fields[stage_field_id()] = stage["zendesk_value"]
+    extra = {"files": [u.filename for u in uploads]} if uploads else {}
+    if video:
+        extra["video_url"] = video
+
+    posted = False
     try:
         # One ticket at a time: a double tap waits here, then finds the first
         # post's event below and stops, so the customer is emailed once.
@@ -354,28 +570,41 @@ def post_stage(ticket_id, key):
             if repair_db.recent_stage_event(conn, ticket_id, key, DUPLICATE_WINDOW_SECONDS):
                 flash(f"“{stage['label']}” was just posted for this ticket. Not sent again.", "error")
                 return _back(ticket_id)
-            if not record_only:
+            if body is not None:
                 try:
+                    tokens = [zendesk.upload_file(u.filename, u.data, u.content_type) for u in uploads]
                     zendesk.post_update(
                         ticket_id,
-                        message,
-                        public=True,
+                        body,
+                        public=(mode == "public"),
                         tags=[portal_tag(), f"rp-{key}"],
                         custom_fields=custom_fields,
+                        uploads=tokens,
                     )
                 except ZendeskError as exc:
                     flash(f"Zendesk rejected the update, so nothing was sent or saved: {exc}", "error")
                     return _back(ticket_id)
-                emailed = True
+                posted = True
+            if fields.get("picks") and fields["picks"][2]:
+                kind, ids, add = fields["picks"]
+                added = repair_db.ensure_choice(kind, add, conn=conn)
+                fields["picks"] = (kind, ids if added["id"] in ids else [*ids, added["id"]], None)
             repair_db.record_stage(
-                conn, ticket_id, stage, tech, fields, None if record_only else message, rma["stage"]
+                conn,
+                ticket_id,
+                stage,
+                tech,
+                fields,
+                body if mode == "public" else None,
+                rma["stage"],
+                extra=extra,
             )
     except Exception:
-        if not emailed:
+        if not posted:
             raise
         logger.exception("Stage %s posted to Zendesk but not saved for ticket %s", key, ticket_id)
         flash(
-            f"The customer was emailed “{stage['label']}”, but saving the repair record failed. "
+            f"“{stage['label']}” was posted to Zendesk, but saving the repair record failed. "
             "Tell IT; do not press it again.",
             "error",
         )
@@ -387,17 +616,22 @@ def post_stage(ticket_id, key):
             "Let CS know so they can contact the customer.",
             "success",
         )
-    else:
+    elif mode == "public":
         flash(f"Posted “{stage['label']}” on ticket #{ticket_id}. Zendesk will email the customer.", "success")
+    elif key == "tested" and fields.get("test_result") == "fail":
+        flash("Saved the failed test as an internal note. The customer was not emailed.", "success")
+    else:
+        flash(f"Saved “{stage['label']}”. The customer was not emailed.", "success")
     return _back(ticket_id)
 
 
-OTHER_MAX = 200  # free-text "Other" on the inspection / repair forms
+OTHER_MAX = 200  # free-text "Other" on the checklists
 LIST_LABEL_MAX = 80  # longest "Other" text that can be added to a list
+_NOUNS = {"problem": "problem found", "solution": "repair done", "accessory": "accessory"}
 
 
-def _read_picks(form, kind):
-    """Read a form's checkboxes + "Other" text for the problem or solution list.
+def _read_picks(form, kind, required=True):
+    """Read a form's checkboxes + "Other" text for one of the lists.
 
     Returns (choice ids, other text or None, customer-facing summary), or an
     error message. With "add to the list" ticked, the Other text becomes a
@@ -411,23 +645,20 @@ def _read_picks(form, kind):
             continue
     choices = repair_db.get_active_choices(raw_ids, kind)
     other = " ".join((form.get(f"{kind}_other") or "").split())[:OTHER_MAX] or None
-    noun = "problem found" if kind == "problem" else "repair done"
-    if not choices and not other:
-        return f"Tick at least one {noun}, or describe it under Other."
+    if required and not choices and not other:
+        return f"Tick at least one {_NOUNS[kind]}, or describe it under Other."
+    labels = [c["label"] for c in choices] + ([other] if other else [])
     if other and form.get(f"{kind}_add") == "1":
         if len(other) > LIST_LABEL_MAX:
             return f"That Other text is too long to add to the list (max {LIST_LABEL_MAX} characters)."
-        added = repair_db.ensure_choice(kind, other)
-        if added["id"] not in {c["id"] for c in choices}:
-            choices = [*choices, added]
-        other = None
-    labels = [c["label"] for c in choices] + ([other] if other else [])
-    return [c["id"] for c in choices], other, ", ".join(labels)
+        # Added to the list only once the post succeeds (see post_stage), as a tick, not Other.
+        return [c["id"] for c in choices], None, ", ".join(labels), other
+    return [c["id"] for c in choices], other, ", ".join(labels), None
 
 
 @portal_bp.route("/t/<int:ticket_id>/action", methods=["POST"])
 def post_action(ticket_id):
-    """Extra quick-action buttons and free-form notes (no stage change)."""
+    """Other updates (Awaiting parts, On hold...) and notes, with optional files (no stage change)."""
     if not db.available():
         flash("Database not configured. Cannot post actions.", "error")
         return _back(ticket_id)
@@ -437,50 +668,87 @@ def post_action(ticket_id):
 
     action_id = request.form.get("action_id")
     note = (request.form.get("note") or "").strip()
+    uploads, upload_error = files.read_uploads(request.files.getlist("files"))
+    video = files.clean_video_url(request.form.get("video_url"))
+    if upload_error or video is False:
+        flash(upload_error or "That video link doesn't look like a web address (https://…).", "error")
+        return _back(ticket_id)
 
+    action = None
     if action_id:
         try:
             action = db.get_quick_action(int(action_id))
         except ValueError:
             action = None
         if not action or not action["active"]:
-            flash("That quick action no longer exists.", "error")
+            flash("That update button no longer exists.", "error")
             return _back(ticket_id)
-        body, public, kind = action["comment_body"], True, "action"
+        public, kind = bool(action.get("public", True)), "action"
+        body = action["comment_body"]
         tags = [portal_tag(), action["tag"]]
         label = action["label"]
-        excerpt = None
-    elif note:
+    elif note or uploads or video:
         public = request.form.get("note_visibility") == "public"
-        body, kind = note, "note"
+        body, kind = note or ("Photos/files attached." if uploads else "Video link:"), "note"
         tags = [portal_tag()]
         label = "Public note" if public else "Internal note"
-        excerpt = note[:NOTE_EXCERPT_CHARS]
     else:
-        flash("Pick a quick action or write a note first.", "error")
+        flash("Pick an update, or write a note / attach a file first.", "error")
         return _back(ticket_id)
+    excerpt = note[:NOTE_EXCERPT_CHARS] if note else None
+    note_public = request.form.get("note_visibility") == "public"
+    # A note, files or video typed alongside a button go in a SEPARATE post that
+    # follows the note's own Internal/Public choice, never the button's.
+    follow_up = None
+    if action is not None and (note or uploads or video):
+        follow_up = _with_video(note or "Photos/files attached.", video)
+    else:
+        body = _with_video(body, video)
 
+    zendesk = _get_zendesk()
     try:
-        _get_zendesk().post_update(ticket_id, body, public=public, tags=tags)
+        tokens = [zendesk.upload_file(u.filename, u.data, u.content_type) for u in uploads]
+        if follow_up is None:
+            zendesk.post_update(ticket_id, body, public=public, tags=tags, uploads=tokens)
+        else:
+            zendesk.post_update(ticket_id, body, public=public, tags=tags)
+            zendesk.post_update(ticket_id, follow_up, public=note_public, tags=[portal_tag()], uploads=tokens)
     except ZendeskError as exc:
         flash(f"Zendesk rejected the update: {exc}", "error")
         return _back(ticket_id)
 
     try:
         if repair_db.get_rma(ticket_id):
+            detail = {}
+            if excerpt:
+                detail["note"] = excerpt
+            if uploads:
+                detail["files"] = [u.filename for u in uploads]
+            if video:
+                detail["video_url"] = video
             repair_db.record_event(
-                ticket_id,
-                kind,
-                label,
-                tech,
-                detail={"note": excerpt} if excerpt else None,
-                customer_message=body if public else None,
+                ticket_id, kind, label, tech, detail=detail or None, customer_message=body if public else None
             )
+            if action is not None:
+                repair_db.set_flag(ticket_id, label)
         else:
             db.log_action(ticket_id, label, excerpt, tech["name"])
     except Exception:  # the Zendesk write succeeded; a lost log line is not fatal
         logger.exception("Could not log portal action for ticket %s", ticket_id)
 
-    what = "a public reply" if public else "an internal note"
-    flash(f"Posted “{label}” as {what} on ticket #{ticket_id}.", "success")
+    what = "a public reply (the customer is emailed)" if public else "an internal note"
+    extra = ""
+    if follow_up is not None:
+        extra = " Your note was posted separately as " + ("a public reply." if note_public else "an internal note.")
+    flash(f"Posted “{label}” as {what} on ticket #{ticket_id}.{extra}", "success")
+    return _back(ticket_id)
+
+
+@portal_bp.route("/t/<int:ticket_id>/clear-flag", methods=["POST"])
+def clear_flag(ticket_id):
+    """Take an "Other update" (e.g. On hold) off the queue card without posting anything."""
+    if not db.available() or _need_tech() is None:
+        return _back(ticket_id)
+    repair_db.set_flag(ticket_id, None)
+    flash("Cleared the status flag.", "success")
     return _back(ticket_id)

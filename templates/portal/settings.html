@@ -21,12 +21,15 @@
   {% if stage_field %}Stage posts also set Zendesk field {{ stage_field }}.{% else %}Set <code>ZENDESK_STAGE_FIELD_ID</code> to also set an "RMA Stage" drop-down in Zendesk.{% endif %}
 </p>
 <nav class="settings-toc">
-  <a href="#stages">Stages</a> <a href="#problems">Problems</a> <a href="#solutions">Solutions</a>
+  <a href="#stages">Stages</a> <a href="#inspection_points">Inspection</a> <a href="#accessorys">Accessories</a>
+  <a href="#problems">Problems</a> <a href="#solutions">Solutions</a>
   <a href="#techs">People</a> <a href="#actions">Other updates</a>
 </nav>
 
 <h2 id="stages" class="section-head">Stages and customer messages</h2>
-<p class="tagline">Placeholders: <code>{problem}</code> <code>{solution}</code> <code>{work_done}</code> <code>{tracking}</code>.</p>
+<p class="tagline">Placeholders: <code>{accessories}</code> <code>{arrival_note}</code> <code>{inspection}</code>
+  <code>{points}</code> <code>{problem}</code> <code>{solution}</code> <code>{work_done}</code> <code>{group}</code>
+  <code>{distance}</code> <code>{ammo}</code> <code>{tracking}</code>.</p>
 {% for s in stages %}
 <form method="post" action="{{ url_for('admin.save_stage', key=s.key) }}" class="admin-row">
   {{ csrf_field() }}
@@ -40,8 +43,8 @@
 </form>
 {% endfor %}
 
-{% for kind, items in (('problem', problems), ('solution', solutions)) %}
-<h2 id="{{ kind }}s" class="section-head">{{ 'Problems (inspection form)' if kind == 'problem' else 'Solutions (repair form)' }}</h2>
+{% for kind, title, items in lists %}
+<h2 id="{{ kind }}s" class="section-head">{{ title }}</h2>
 <div class="admin-row">
   <table class="list-table">
     {% for c in items %}
@@ -62,7 +65,7 @@
   <form method="post" action="{{ url_for('admin.save_choice') }}" class="list-form add">
     {{ csrf_field() }}
     <input type="hidden" name="kind" value="{{ kind }}"><input type="hidden" name="op" value="create">
-    <input type="text" name="label" placeholder="Add a {{ kind }}" required>
+    <input type="text" name="label" placeholder="Add an item" required>
     <button type="submit">Add</button>
   </form>
 </div>
@@ -97,7 +100,7 @@
 </div>
 
 <h2 id="actions" class="section-head">Other updates</h2>
-<p class="tagline">Extra buttons on the ticket page that post a public reply without changing the stage.</p>
+<p class="tagline">One-tap status buttons on the ticket page (Awaiting parts, Under review, On hold…). They don't change the stage; the label shows on the queue card until the next stage is posted.</p>
 {% for action in actions %}
 <form method="post" action="{{ url_for('admin.save_action') }}" class="admin-row {% if not action.active %}inactive{% endif %}">
   {{ csrf_field() }}<input type="hidden" name="id" value="{{ action.id }}">
@@ -106,6 +109,7 @@
     <label>Tag <input type="text" name="tag" value="{{ action.tag }}" required></label>
     <label>Position <input type="number" name="position" value="{{ action.position }}" class="narrow"></label>
     <label class="check">Active <input type="checkbox" name="active" {% if action.active %}checked{% endif %}></label>
+    <label class="check">Public (emails the customer) <input type="checkbox" name="public" {% if action.public %}checked{% endif %}></label>
     <label class="wide">Public reply posted to the customer
       <textarea name="comment_body" rows="2" required>{{ action.comment_body }}</textarea></label>
   </div>
@@ -117,6 +121,7 @@
   <div class="admin-grid">
     <label>Button label <input type="text" name="label" placeholder="e.g. Waiting on parts" required></label>
     <label>Tag <input type="text" name="tag" placeholder="e.g. rp-parts" required></label>
+    <label class="check">Public (emails the customer) <input type="checkbox" name="public" checked></label>
     <label class="wide">Public reply posted to the customer <textarea name="comment_body" rows="2" required></textarea></label>
   </div>
   <button type="submit">Add</button>

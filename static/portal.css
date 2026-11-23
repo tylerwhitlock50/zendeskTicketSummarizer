@@ -475,7 +475,7 @@ button:disabled, .primary-btn:disabled, .action-btn:disabled, .small-btn:disable
 /* ---------- queue board ---------- */
 .board {
   display: grid;
-  grid-template-columns: repeat(5, minmax(200px, 1fr));
+  grid-template-columns: repeat(6, minmax(170px, 1fr));
   gap: 1px;
   background: var(--line);
   border: 1px solid var(--line);
@@ -688,6 +688,183 @@ button:disabled, .primary-btn:disabled, .action-btn:disabled, .small-btn:disable
   .scan-card { padding: 24px 20px; margin-top: 4vh; }
   .downloads { margin-left: 0; }
 }
+
+/* ---------- stage forms v2: flags, complaint, pass/issue, attachments ---------- */
+/* a flag is a "needs attention" signal, so it gets ember */
+.flag-pill {
+  display: inline-flex;
+  align-items: center;
+  font-family: var(--font-label);
+  font-weight: 600;
+  font-size: 13px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  padding: 4px 8px;
+  background: var(--accent);
+  color: var(--accent-ink);
+  white-space: nowrap;
+}
+.flag-pill.small { font-size: 11px; padding: 2px 6px; align-self: flex-start; margin-top: 3px; }
+
+.complaint { margin-top: 12px; font-size: 15px; }
+.complaint summary {
+  cursor: pointer;
+  font-family: var(--font-label);
+  font-weight: 600;
+  font-size: 14px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--brand);
+}
+.complaint p {
+  white-space: pre-wrap;
+  background: var(--canvas);
+  border-left: 3px solid var(--line-strong);
+  padding: 10px 12px;
+  margin: 8px 0 0;
+  max-height: 260px;
+  overflow: auto;
+  line-height: 1.5;
+}
+.complaint-quote {
+  margin: 0;
+  background: var(--canvas);
+  border-left: 3px solid var(--ink);
+  padding: 10px 12px;
+  font-size: 15px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
+.field-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; font-size: 15px; }
+.field-label {
+  font-family: var(--font-label);
+  font-weight: 600;
+  font-size: 13px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted-2);
+}
+
+/* segmented pass / issue control: choice chips joined together */
+.seg { display: inline-flex; border: 1px solid var(--line-strong); border-radius: var(--radius); overflow: hidden; }
+.stage-form .seg label {
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+  min-height: 44px;
+  padding: 0 14px;
+  font-family: var(--font-body);
+  font-weight: 600;
+  font-size: 15px;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--ink-2);
+  background: var(--surface);
+  border-right: 1px solid var(--line-strong);
+  cursor: pointer;
+}
+.stage-form .seg label:last-child { border-right: none; }
+.seg label:has(input:checked) { background: var(--ink); color: var(--canvas); }
+.seg label.seg-ok:has(input:checked) { background: var(--brand); color: var(--canvas); }
+.seg label.seg-issue:has(input:checked) { background: var(--accent); color: var(--accent-ink); }
+
+.points { width: 100%; border-collapse: collapse; }
+.points td { padding: 8px 8px 8px 0; border-bottom: 1px solid var(--line); vertical-align: middle; font-size: 15px; }
+.points td.point-label { width: 38%; font-weight: 500; color: var(--ink); }
+.points td.point-result { white-space: nowrap; }
+.points input[type="text"] { width: 100%; }
+@media (max-width: 700px) {
+  .points tr { display: grid; grid-template-columns: 1fr; gap: 6px; padding: 10px 0; border-bottom: 1px solid var(--line); }
+  .points td { border: none; width: auto !important; padding: 0; }
+}
+
+.link-btn.small { font-size: 12px; color: var(--brand); margin-left: 8px; }
+.link-btn.small:hover { color: var(--brand-hover); }
+.inline-form.right { float: right; }
+.inline-fields { display: flex; gap: 12px; flex-wrap: wrap; }
+.inline-fields label { flex: 1 1 140px; }
+.portal-main input[type="url"] {
+  min-height: 44px;
+  padding: 10px 12px;
+  font-size: 16px;
+  font-family: var(--font-body);
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+}
+
+.attach-row {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  background: var(--canvas);
+  border: 1px dashed var(--line-strong);
+  padding: 12px 14px;
+}
+.attach-row label {
+  flex: 1 1 240px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-family: var(--font-label);
+  font-weight: 600;
+  font-size: 13px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted-2);
+}
+.attach-row input[type="file"] { font-family: var(--font-body); font-size: 15px; letter-spacing: 0; text-transform: none; }
+.attach-row input[type="file"]::file-selector-button {
+  height: 40px;
+  margin-right: 10px;
+  padding: 0 14px;
+  font-family: var(--font-label);
+  font-weight: 600;
+  font-size: 13px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  background: transparent;
+  color: var(--ink);
+  border: 1px solid var(--ink);
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+.note-form .attach-row { margin-top: 10px; }
+.note-form textarea { margin-bottom: 4px; }
+
+/* internal-only quick updates: quieter outline so they read differently from public ones */
+.action-btn.internal { border-style: dashed; color: var(--muted-2); border-color: var(--muted-2); }
+.action-btn.internal:hover { background: var(--ink-2); border-color: var(--ink-2); color: var(--canvas); }
+
+.gallery { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
+.gallery-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  text-decoration: none;
+  color: inherit;
+  border: 1px solid var(--line);
+  padding: 6px;
+  background: var(--surface);
+}
+.gallery-item:hover { border-color: var(--ink); color: inherit; }
+.gallery-item img { width: 100%; height: 120px; object-fit: cover; background: var(--track); }
+.file-chip {
+  height: 120px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--track);
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 22px;
+  letter-spacing: 0.06em;
+  color: var(--muted-2);
+}
+.file-name { font-size: 14px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-meta { font-size: 12px; color: var(--faint); }
+.video-link { font-size: 15px; margin: 8px 0 0; word-break: break-all; }
 
 @media print {
   .portal-page { background: #fff; }
