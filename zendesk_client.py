@@ -60,6 +60,20 @@ class ZendeskClient:
         payload = {"ticket": {"comment": {"body": body, "public": bool(public)}}}
         return self._request("PUT", f"/tickets/{ticket_id}.json", json=payload)
 
+    def post_update(self, ticket_id, body, public=True, tags=None, custom_fields=None):
+        """Comment, add tags and set custom fields in ONE ticket update.
+
+        One request means the customer email and the tag/field change land
+        together: there is no half-applied state if the second call would
+        have failed. ``additional_tags`` appends without replacing existing tags.
+        """
+        ticket = {"comment": {"body": body, "public": bool(public)}}
+        if tags:
+            ticket["additional_tags"] = list(tags)
+        if custom_fields:
+            ticket["custom_fields"] = [{"id": fid, "value": val} for fid, val in custom_fields.items()]
+        return self._request("PUT", f"/tickets/{ticket_id}.json", json={"ticket": ticket})
+
     def add_tags(self, ticket_id, tags):
         """Append tags to a ticket without touching the ones already there."""
         return self._request("PUT", f"/tickets/{ticket_id}/tags.json", json={"tags": list(tags)})
@@ -84,7 +98,10 @@ class ZendeskClient:
                 return
 
     def get_ticket(self, ticket_id):
-        """Return (ticket, requester, organization) using sideloading."""
+        """Return (ticket, requester, organization) using sideloading.
+
+        Note: a closed ticket can still be read, but Zendesk rejects comments on it.
+        """
         try:
             data = self._get(f"/tickets/{ticket_id}.json", params={"include": "users,organizations"})
         except ZendeskError as exc:

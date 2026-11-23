@@ -1,0 +1,31 @@
+{% extends "portal/base.html" %}
+{% block title %}Sign in{% endblock %}
+{% block content %}
+<div class="scan-card">
+  <h1>Who's working?</h1>
+  {% if techs is none %}
+    <div class="notice warn">Database not configured.</div>
+  {% elif not techs %}
+    <p class="tagline">No one is set up yet. Add people and their PINs under
+      <a href="{{ url_for('admin.settings') }}#techs">Settings</a>.</p>
+  {% else %}
+  <form method="post" class="signin-form">
+    {{ csrf_field() }}
+    <input type="hidden" name="next" value="{{ next_url }}">
+    <div class="tech-picker">
+      {% for t in techs %}
+      <label class="tech-choice">
+        <input type="radio" name="tech_id" value="{{ t.id }}" required {% if loop.length == 1 %}checked{% endif %}>
+        <span>{{ t.name }}</span>
+      </label>
+      {% endfor %}
+    </div>
+    <label class="pin-label">PIN
+      <input type="password" name="pin" inputmode="numeric" autocomplete="off" required maxlength="8">
+    </label>
+    <button type="submit" class="primary-btn">Sign in</button>
+  </form>
+  <p class="hint">Stays signed in for your shift on this device.</p>
+  {% endif %}
+</div>
+{% endblock %}

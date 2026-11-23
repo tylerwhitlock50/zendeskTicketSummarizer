@@ -45,6 +45,26 @@ def _conn() -> Iterator[psycopg.Connection]:
         yield conn
 
 
+def shared_secret() -> Optional[str]:
+    """A random session-signing key stored in the DB, shared by every worker.
+
+    Created on first use; returns None if the table isn't there yet (run the
+    migrations) or the database can't be reached.
+    """
+    import secrets
+
+    try:
+        with _conn() as conn:
+            conn.execute(
+                "INSERT INTO repair.app_secret (id, secret) VALUES (1, %s) ON CONFLICT (id) DO NOTHING",
+                (secrets.token_urlsafe(48),),
+            )
+            row = conn.execute("SELECT secret FROM repair.app_secret WHERE id = 1").fetchone()
+    except psycopg.Error:
+        return None
+    return row["secret"] if row else None
+
+
 # ---------------------------------------------------------------- quick actions
 
 

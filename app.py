@@ -3,13 +3,16 @@
 import logging
 import os
 import re
+import secrets
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 from flask import Flask, redirect, render_template, request, url_for
 
 import barcodes
 from summarizer import build_transcript, summarize_ticket
+from repair_db import REPORT_TZ
 from zendesk_client import ZendeskClient, ZendeskError, resolve_custom_fields
 
 load_dotenv()
@@ -17,23 +20,46 @@ load_dotenv()
 REQUIRED_ENV_VARS = ["ZENDESK_SUBDOMAIN", "ZENDESK_EMAIL", "ZENDESK_API_TOKEN", "OPENAI_API_KEY"]
 
 app = Flask(__name__)
-app.secret_key = os.environ.get("FLASK_SECRET_KEY", "dev-secret-change-me")  # flash() needs it
 _client = None
 
-# Scan portal (quick actions + admin + report). The ticket-print routes must
-# keep working even if the portal database is not configured.
+# Scan portal (queue, stage screens, settings, report). The ticket-print routes
+# must keep working even if the portal database is not configured.
+import auth
 import db
+from admin_views import admin_bp
 from portal_views import portal_bp
+from report_views import report_bp
 
 app.register_blueprint(portal_bp)
+app.register_blueprint(admin_bp)
+app.register_blueprint(report_bp)
+app.before_request(auth.check_csrf)
+
+
+@app.context_processor
+def _portal_context():
+    return {
+        "csrf_field": auth.csrf_field,
+        "current_tech": auth.current_tech,
+        "admin_locked": bool(auth.admin_password()),
+    }
 
 _dsn = os.environ.get("DATABASE_URL", "") or os.environ.get("RTM_DATABASE_URL", "")
 if _dsn:
     db.init_pool(_dsn)
 else:
     logging.getLogger(__name__).warning(
-        "DATABASE_URL is not set; the scan portal's quick actions will be unavailable."
+        "DATABASE_URL is not set; the repair portal will be unavailable."
     )
+
+# Session signing key (sign-ins, CSRF, flash). Never a guessable default:
+# FLASK_SECRET_KEY if set, else a random key kept in the database so every
+# gunicorn worker shares it, else a per-process random key (one-pager only).
+app.secret_key = (
+    os.environ.get("FLASK_SECRET_KEY")
+    or (db.shared_secret() if db.available() else None)
+    or secrets.token_urlsafe(48)
+)
 
 
 def missing_config():
@@ -61,6 +87,14 @@ def datefmt(value):
     except ValueError:
         return value
     return parsed.strftime("%b %d, %Y %H:%M UTC")
+
+
+@app.template_filter("localtime")
+def localtime(value, fmt="%b %d %I:%M %p"):
+    """Show a database timestamp (UTC) in shop-local time."""
+    if not value:
+        return "—"
+    return value.astimezone(ZoneInfo(REPORT_TZ)).strftime(fmt)
 
 
 @app.route("/")

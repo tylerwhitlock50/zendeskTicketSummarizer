@@ -1,0 +1,35 @@
+{% extends "portal/base.html" %}
+{% block title %}Repair queue{% endblock %}
+{% block main_class %}wide{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>Repair queue</h1>
+  <a href="{{ url_for('portal.incoming') }}" class="secondary-btn">Incoming from Zendesk</a>
+</div>
+{% if columns is none %}
+<div class="notice warn">Database not configured. Set <code>DATABASE_URL</code> and run migrations.</div>
+{% else %}
+<div class="board">
+  {% for key in board_stages %}
+  {% set items = columns.get(key, []) %}
+  <section class="board-col">
+    <h2>
+      {% if key == 'queued' %}Waiting to receive{% elif key == 'shipped' %}{{ stages[key].label }} <span class="subtle">last 14 days</span>{% else %}{{ stages[key].label }}{% endif %}
+      <span class="count">{{ items|length }}</span>
+    </h2>
+    {% for r in items %}
+    <a class="board-card" href="{{ url_for('portal.action_page', ticket_id=r.ticket_id) }}">
+      <span class="card-id">#{{ r.ticket_id }}</span>
+      <span class="card-subject">{{ r.subject or '(no subject)' }}</span>
+      <span class="card-meta">{{ r.requester_name or '' }}</span>
+      <span class="card-meta">{% if key == 'shipped' %}shipped{% else %}since{% endif %} {{ r.stage_since|localtime('%b %d') }}
+        {% if r.problem_label and key in ('inspected', 'repaired') %} &middot; {{ r.problem_label }}{% endif %}</span>
+    </a>
+    {% else %}
+    <p class="empty">None</p>
+    {% endfor %}
+  </section>
+  {% endfor %}
+</div>
+{% endif %}
+{% endblock %}

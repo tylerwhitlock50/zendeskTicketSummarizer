@@ -29,9 +29,10 @@
     </form>
 
     <p class="tagline">
+      <a href="{{ url_for('portal.queue') }}">Repair queue</a> &middot;
       <a href="{{ url_for('portal.scan') }}">Scan portal</a> &middot;
-      <a href="{{ url_for('portal.report') }}">Tag report</a> &middot;
-      <a href="{{ url_for('portal.admin_actions') }}">Quick-action settings</a>
+      <a href="{{ url_for('report.weekly') }}">Repair report</a> &middot;
+      <a href="{{ url_for('admin.settings') }}">Settings</a>
     </p>
   </main>
 </body>
