@@ -299,24 +299,21 @@ def post_stage(ticket_id, key):
     record_only = form.get("record_only") == "1"
 
     fields, values = {}, {}
-    if key == "inspected":
-        problem = _pick_choice(form.get("problem_id"), "problem")
-        if problem is None:
-            flash("Pick the problem found.", "error")
+    if key in ("inspected", "repaired"):
+        kind = "problem" if key == "inspected" else "solution"
+        picked = _read_picks(form, kind)
+        if isinstance(picked, str):
+            flash(picked, "error")
             return _back(ticket_id)
-        fields = {
-            "problem_id": problem["id"],
-            "problem_notes": (form.get("problem_notes") or "").strip() or None,
-        }
-        values = {"problem": problem["label"]}
-    elif key == "repaired":
-        solution = _pick_choice(form.get("solution_id"), "solution")
-        if solution is None:
-            flash("Pick the repair done.", "error")
-            return _back(ticket_id)
-        work_done = (form.get("work_done") or "").strip()
-        fields = {"solution_id": solution["id"], "work_done": work_done or None}
-        values = {"solution": solution["label"], "work_done": work_done or solution["label"]}
+        ids, other, summary = picked
+        fields = {"picks": (kind, ids), f"{kind}_other": other}
+        values = {kind: summary}
+        if key == "inspected":
+            fields["problem_notes"] = (form.get("problem_notes") or "").strip() or None
+        else:
+            work_done = (form.get("work_done") or "").strip()
+            fields["work_done"] = work_done or None
+            values["work_done"] = work_done or summary
     elif key == "shipped":
         tracking = (form.get("tracking_number") or "").strip()
         if not TRACKING_RE.match(tracking):
@@ -326,9 +323,9 @@ def post_stage(ticket_id, key):
         values = {"tracking": tracking}
 
     # Placeholders from earlier stages stay available to later messages.
-    values.setdefault("problem", rma.get("problem_label") or "")
-    values.setdefault("solution", rma.get("solution_label") or "")
-    values.setdefault("work_done", rma.get("work_done") or rma.get("solution_label") or "")
+    values.setdefault("problem", rma.get("problem_summary") or "")
+    values.setdefault("solution", rma.get("solution_summary") or "")
+    values.setdefault("work_done", rma.get("work_done") or rma.get("solution_summary") or "")
     values.setdefault("tracking", rma.get("tracking_number") or "")
 
     message = render_message(stage["comment_body"], values)
@@ -395,12 +392,37 @@ def post_stage(ticket_id, key):
     return _back(ticket_id)
 
 
-def _pick_choice(raw, kind):
-    try:
-        choice = repair_db.get_choice(int(raw), kind)
-    except (TypeError, ValueError):
-        return None
-    return choice if choice and choice["active"] else None
+OTHER_MAX = 200  # free-text "Other" on the inspection / repair forms
+LIST_LABEL_MAX = 80  # longest "Other" text that can be added to a list
+
+
+def _read_picks(form, kind):
+    """Read a form's checkboxes + "Other" text for the problem or solution list.
+
+    Returns (choice ids, other text or None, customer-facing summary), or an
+    error message. With "add to the list" ticked, the Other text becomes a
+    list item (or re-uses a matching one) and is picked instead.
+    """
+    raw_ids = []
+    for raw in form.getlist(f"{kind}_ids"):
+        try:
+            raw_ids.append(int(raw))
+        except ValueError:
+            continue
+    choices = repair_db.get_active_choices(raw_ids, kind)
+    other = " ".join((form.get(f"{kind}_other") or "").split())[:OTHER_MAX] or None
+    noun = "problem found" if kind == "problem" else "repair done"
+    if not choices and not other:
+        return f"Tick at least one {noun}, or describe it under Other."
+    if other and form.get(f"{kind}_add") == "1":
+        if len(other) > LIST_LABEL_MAX:
+            return f"That Other text is too long to add to the list (max {LIST_LABEL_MAX} characters)."
+        added = repair_db.ensure_choice(kind, other)
+        if added["id"] not in {c["id"] for c in choices}:
+            choices = [*choices, added]
+        other = None
+    labels = [c["label"] for c in choices] + ([other] if other else [])
+    return [c["id"] for c in choices], other, ", ".join(labels)
 
 
 @portal_bp.route("/t/<int:ticket_id>/action", methods=["POST"])

@@ -1,5 +1,21 @@
 {% extends "portal/base.html" %}
 {% block title %}Ticket #{{ ticket.id }}{% endblock %}
+{% macro checklist(kind, title, items, picked, other) %}
+<fieldset class="checklist">
+  <legend>{{ title }} <span class="subtle">tick all that apply</span></legend>
+  <div class="check-grid">
+    {% for c in items %}
+    <label class="check-item"><input type="checkbox" name="{{ kind }}_ids" value="{{ c.id }}"
+      {% if picked and c.id in picked %}checked{% endif %}> <span>{{ c.label }}</span></label>
+    {% endfor %}
+  </div>
+  <label class="other-label">Other <span class="subtle">anything not on the list</span>
+    <input type="text" name="{{ kind }}_other" value="{{ other or '' }}" maxlength="200" autocomplete="off">
+  </label>
+  <label class="check-line add-line"><input type="checkbox" name="{{ kind }}_add" value="1">
+    Add this Other to the {{ kind }} list for next time</label>
+</fieldset>
+{% endmacro %}
 {% block content %}
 {% set closed = ticket.status == 'closed' %}
 <header class="ticket-head">
@@ -59,28 +75,14 @@
         <form method="post" action="{{ url_for('portal.post_stage', ticket_id=ticket.id, key=stage.key) }}" class="stage-form">
           {{ csrf_field() }}
           {% if stage.key == 'inspected' %}
-            <label>Problem found
-              <select name="problem_id" required>
-                <option value="">Pick one…</option>
-                {% for c in problems %}
-                <option value="{{ c.id }}" {% if rma.problem_id == c.id %}selected{% endif %}>{{ c.label }}</option>
-                {% endfor %}
-              </select>
-            </label>
+            {{ checklist('problem', 'Problems found', problems, rma.problem_ids, rma.problem_other) }}
             <label>Inspection notes <span class="subtle">internal only</span>
               <textarea name="problem_notes" rows="2">{{ rma.problem_notes or '' }}</textarea>
             </label>
           {% elif stage.key == 'repaired' %}
-            <label>Repair done
-              <select name="solution_id" required>
-                <option value="">Pick one…</option>
-                {% for c in solutions %}
-                <option value="{{ c.id }}" {% if rma.solution_id == c.id %}selected{% endif %}>{{ c.label }}</option>
-                {% endfor %}
-              </select>
-            </label>
+            {{ checklist('solution', 'Repairs done', solutions, rma.solution_ids, rma.solution_other) }}
             <label>Work done <span class="subtle">sent to the customer</span>
-              <textarea name="work_done" rows="2" placeholder="Blank uses the repair picked above">{{ rma.work_done or '' }}</textarea>
+              <textarea name="work_done" rows="2" placeholder="Blank uses the repairs ticked above">{{ rma.work_done or '' }}</textarea>
             </label>
           {% elif stage.key == 'shipped' %}
             <label>Return tracking number
@@ -137,8 +139,8 @@
     <h2>Repair record</h2>
     <dl class="record">
       <dt>Added</dt><dd>{{ rma.added_at|localtime }} by {{ rma.added_by or '—' }}</dd>
-      {% if rma.problem_label %}<dt>Problem</dt><dd>{{ rma.problem_label }}{% if rma.problem_notes %} — {{ rma.problem_notes }}{% endif %}</dd>{% endif %}
-      {% if rma.solution_label %}<dt>Repair</dt><dd>{{ rma.solution_label }}{% if rma.work_done %} — {{ rma.work_done }}{% endif %}</dd>{% endif %}
+      {% if rma.problem_summary %}<dt>Problems</dt><dd>{{ rma.problem_summary }}{% if rma.problem_notes %} — {{ rma.problem_notes }}{% endif %}</dd>{% endif %}
+      {% if rma.solution_summary %}<dt>Repairs</dt><dd>{{ rma.solution_summary }}{% if rma.work_done %} — {{ rma.work_done }}{% endif %}</dd>{% endif %}
       {% if rma.tracking_number %}<dt>Tracking</dt><dd>{{ rma.tracking_number }}</dd>{% endif %}
     </dl>
     <table class="history">

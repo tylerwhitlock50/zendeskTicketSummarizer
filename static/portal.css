@@ -254,3 +254,13 @@ button:disabled, .primary-btn:disabled, .action-btn:disabled, .small-btn:disable
 .range-form button { padding: 7px 14px; border: none; border-radius: 6px; background: #0b5cad; color: #fff; cursor: pointer; }
 .downloads { margin-left: auto; font-size: 14px; }
 .stage-form label.check-line { flex-direction: row; align-items: center; gap: 8px; color: #8a5a00; font-size: 13.5px; }
+
+/* inspection / repair checklists */
+.checklist { border: 1px solid #d5dbe1; border-radius: 8px; padding: 10px 12px 12px; margin: 0; display: flex; flex-direction: column; gap: 10px; }
+.checklist legend { font-size: 13px; color: #34404c; font-weight: 600; padding: 0 4px; }
+.check-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 6px; }
+.stage-form .check-item { flex-direction: row; align-items: center; gap: 8px; font-size: 15px; color: #1a1d21;
+  border: 1px solid #e0e5ea; border-radius: 6px; padding: 9px 10px; cursor: pointer; }
+.check-item input { width: 18px; height: 18px; }
+.check-item:has(input:checked) { background: #e7f1fb; border-color: #0b5cad; }
+.stage-form .add-line { color: #5a6470; }
