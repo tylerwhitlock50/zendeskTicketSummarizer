@@ -1,0 +1,14 @@
+{% extends "portal/base.html" %}
+{% block title %}Settings sign-in{% endblock %}
+{% block content %}
+<div class="scan-card">
+  <h1>Settings</h1>
+  <p class="tagline">Enter the settings password.</p>
+  <form method="post" class="lookup-form">
+    {{ csrf_field() }}
+    <input type="hidden" name="next" value="{{ next_url }}">
+    <input type="password" name="password" autocomplete="current-password" required autofocus>
+    <button type="submit">Open</button>
+  </form>
+</div>
+{% endblock %}

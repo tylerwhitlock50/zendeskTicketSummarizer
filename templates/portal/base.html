@@ -8,22 +8,43 @@
   <link rel="stylesheet" href="{{ url_for('static', filename='portal.css') }}">
 </head>
 <body class="portal-page">
+  {% set tech = current_tech() %}
   <nav class="portal-nav no-print">
-    <a href="{{ url_for('portal.scan') }}" class="brand">Repair portal</a>
+    <a href="{{ url_for('portal.queue') }}" class="brand">Repair portal</a>
     <span class="nav-links">
+      <a href="{{ url_for('portal.queue') }}">Queue</a>
+      <a href="{{ url_for('portal.incoming') }}">Incoming</a>
       <a href="{{ url_for('portal.scan') }}">Scan</a>
-      <a href="{{ url_for('portal.report') }}">Report</a>
-      <a href="{{ url_for('portal.admin_actions') }}">Settings</a>
+      <a href="{{ url_for('report.weekly') }}">Report</a>
+      <a href="{{ url_for('admin.settings') }}">Settings</a>
       <a href="{{ url_for('index') }}">Ticket print</a>
     </span>
+    <span class="nav-tech">
+      {% if tech %}
+        <span class="tech-badge">{{ tech.name }}</span>
+        <form method="post" action="{{ url_for('portal.tech_signout') }}" class="inline-form">
+          {{ csrf_field() }}<button type="submit" class="link-btn">Sign out</button>
+        </form>
+      {% else %}
+        <a href="{{ url_for('portal.tech_signin', next=request.path) }}" class="tech-signin">Sign in</a>
+      {% endif %}
+    </span>
   </nav>
-  <main class="portal-main">
+  <main class="portal-main {% block main_class %}{% endblock %}">
     {% with messages = get_flashed_messages(with_categories=true) %}
       {% for category, message in messages %}
-        <div class="notice {{ 'warn' if category == 'error' else 'ok' }}">{{ message }}</div>
+        <div class="notice {{ 'warn' if category == 'error' else 'ok' }}" role="status">{{ message }}</div>
       {% endfor %}
     {% endwith %}
     {% block content %}{% endblock %}
   </main>
+  <script>
+    // One tap = one post: disable a form's buttons once it submits (after the
+    // browser has captured which button was pressed).
+    document.addEventListener("submit", function (e) {
+      var buttons = e.target.querySelectorAll("button[type=submit]");
+      setTimeout(function () { buttons.forEach(function (b) { b.disabled = true; }); }, 0);
+    });
+  </script>
 </body>
 </html>

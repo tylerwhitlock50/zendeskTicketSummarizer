@@ -1,72 +1,171 @@
 {% extends "portal/base.html" %}
-{% block title %}Ticket #{{ ticket.id }} — actions{% endblock %}
+{% block title %}Ticket #{{ ticket.id }}{% endblock %}
 {% block content %}
+{% set closed = ticket.status == 'closed' %}
 <header class="ticket-head">
-  <div>
+  <div class="ticket-head-top">
     <span class="ticket-id">Ticket #{{ ticket.id }}</span>
     <span class="badge status-{{ ticket.status }}">{{ ticket.status|capitalize }}</span>
+    {% if rma %}
+      <span class="stage-pill stage-{{ rma.stage }}">
+        {{ (stages|selectattr('key', 'equalto', rma.stage)|map(attribute='label')|first) or 'Waiting to receive' }}
+      </span>
+    {% endif %}
   </div>
   <h1>{{ ticket.subject or '(no subject)' }}</h1>
   <p class="meta">
     {{ requester.name if requester else 'Unknown requester' }}
     {% if requester and requester.email %} &middot; {{ requester.email }}{% endif %}
-    &middot; updated {{ ticket.updated_at|datefmt }}
   </p>
   <p class="meta">
-    <a href="{{ url_for('ticket_sheet', ticket_id=ticket.id) }}">One-pager</a> &middot;
+    <a href="{{ url_for('ticket_sheet', ticket_id=ticket.id) }}">Print sheet</a> &middot;
     <a href="{{ agent_url }}" target="_blank" rel="noopener">Open in Zendesk</a>
   </p>
 </header>
 
 {% if db_error %}<div class="notice warn">{{ db_error }}</div>{% endif %}
+{% if closed %}
+<div class="notice warn">This ticket is closed in Zendesk, which won't accept new comments on it. Stages can still be saved to the repair record, but the customer is <strong>not</strong> emailed. Let CS know so they can contact the customer.</div>
+{% endif %}
 
 {% if not db_error %}
-<section class="panel">
-  <h2>Quick actions <span class="subtle">posted as a public reply, tagged {{ base_tag }}</span></h2>
-  <form method="post" action="{{ url_for('portal.post_action', ticket_id=ticket.id) }}" class="actions-form">
-    <div class="action-grid">
-      {% for action in actions %}
-      <button type="submit" name="action_id" value="{{ action.id }}" class="action-btn"
-              title="{{ action.comment_body }}">{{ action.label }}</button>
-      {% else %}
-      <p class="empty">No quick actions configured yet — add some under
-        <a href="{{ url_for('portal.admin_actions') }}">Settings</a>.</p>
+  {% if not tech %}
+  <div class="notice warn">
+    <a href="{{ url_for('portal.tech_signin', next=request.path) }}">Sign in with your name and PIN</a> to post updates.
+  </div>
+  {% endif %}
+
+  {% if not rma %}
+  <section class="panel">
+    <h2>Not in the repair queue</h2>
+    <p class="tagline">Add this ticket to start its repair record. Nothing is sent to the customer.</p>
+    <form method="post" action="{{ url_for('portal.add_to_queue', ticket_id=ticket.id) }}">
+      {{ csrf_field() }}
+      <button type="submit" class="primary-btn" {% if not tech or closed %}disabled{% endif %}>Add to repair queue</button>
+    </form>
+  </section>
+  {% else %}
+  <section class="panel">
+    <h2>Update the stage <span class="subtle">each one emails the customer through Zendesk</span></h2>
+    <div class="stage-list">
+      {% for stage in stages %}
+      {% set done_at = rma[stage.key ~ '_at'] %}
+      <details class="stage-card {% if rma.stage == stage.key %}current{% endif %}"
+               {% if stage.key == next_stage %}open{% endif %}>
+        <summary>
+          <span class="stage-name">{{ stage.label }}</span>
+          {% if done_at %}<span class="stage-done">done {{ done_at|localtime }}</span>{% endif %}
+        </summary>
+        <form method="post" action="{{ url_for('portal.post_stage', ticket_id=ticket.id, key=stage.key) }}" class="stage-form">
+          {{ csrf_field() }}
+          {% if stage.key == 'inspected' %}
+            <label>Problem found
+              <select name="problem_id" required>
+                <option value="">Pick one…</option>
+                {% for c in problems %}
+                <option value="{{ c.id }}" {% if rma.problem_id == c.id %}selected{% endif %}>{{ c.label }}</option>
+                {% endfor %}
+              </select>
+            </label>
+            <label>Inspection notes <span class="subtle">internal only</span>
+              <textarea name="problem_notes" rows="2">{{ rma.problem_notes or '' }}</textarea>
+            </label>
+          {% elif stage.key == 'repaired' %}
+            <label>Repair done
+              <select name="solution_id" required>
+                <option value="">Pick one…</option>
+                {% for c in solutions %}
+                <option value="{{ c.id }}" {% if rma.solution_id == c.id %}selected{% endif %}>{{ c.label }}</option>
+                {% endfor %}
+              </select>
+            </label>
+            <label>Work done <span class="subtle">sent to the customer</span>
+              <textarea name="work_done" rows="2" placeholder="Blank uses the repair picked above">{{ rma.work_done or '' }}</textarea>
+            </label>
+          {% elif stage.key == 'shipped' %}
+            <label>Return tracking number
+              <input type="text" name="tracking_number" value="{{ rma.tracking_number or '' }}"
+                     autocomplete="off" required placeholder="Scan the label barcode">
+            </label>
+          {% endif %}
+          <p class="message-preview"><span class="subtle">Customer message:</span> {{ stage.comment_body }}</p>
+          {% if loop.index0 < current_index %}
+          <label class="check-line"><input type="checkbox" name="move_back" value="1">
+            Move back to this stage (it's already done; the customer is emailed again)</label>
+          {% endif %}
+          {% if closed %}<input type="hidden" name="record_only" value="1">{% endif %}
+          <button type="submit" class="primary-btn" {% if not tech %}disabled{% endif %}>
+            {% if closed %}Save “{{ stage.label }}” without emailing{% else %}Post “{{ stage.label }}”{% endif %}
+          </button>
+        </form>
+      </details>
       {% endfor %}
     </div>
-    <label class="initials-label">Your initials
-      <input type="text" name="initials" value="{{ initials }}" maxlength="10" placeholder="e.g. TW">
-    </label>
-  </form>
-</section>
-
-<section class="panel">
-  <h2>Custom note</h2>
-  <form method="post" action="{{ url_for('portal.post_action', ticket_id=ticket.id) }}" class="note-form">
-    <textarea name="note" rows="3" placeholder="Write a note for this ticket…"></textarea>
-    <div class="note-controls">
-      <label><input type="radio" name="note_visibility" value="internal" checked> Internal note</label>
-      <label><input type="radio" name="note_visibility" value="public"> Public reply to customer</label>
-      <input type="hidden" name="initials" value="{{ initials }}">
-      <button type="submit">Post note</button>
-    </div>
-  </form>
-</section>
-
-<section class="panel">
-  <h2>Portal history <span class="subtle">this system only — full thread lives in Zendesk</span></h2>
-  {% if history %}
-  <table class="history">
-    {% for row in history %}
-    <tr>
-      <td>{{ row.created_at.strftime('%b %d %H:%M') }}</td>
-      <td>{{ row.action_label }}{% if row.note_excerpt %} — <em>{{ row.note_excerpt }}</em>{% endif %}</td>
-      <td>{{ row.tech_initials or '' }}</td>
-    </tr>
-    {% endfor %}
-  </table>
-  {% else %}
-  <p class="empty">No portal actions logged for this ticket yet.</p>
+  </section>
   {% endif %}
-</section>
+
+  {% if actions %}
+  <section class="panel">
+    <h2>Other updates <span class="subtle">posted as a public reply</span></h2>
+    <form method="post" action="{{ url_for('portal.post_action', ticket_id=ticket.id) }}" class="actions-form">
+      {{ csrf_field() }}
+      <div class="action-grid">
+        {% for action in actions %}
+        <button type="submit" name="action_id" value="{{ action.id }}" class="action-btn"
+                title="{{ action.comment_body }}" {% if not tech or closed %}disabled{% endif %}>{{ action.label }}</button>
+        {% endfor %}
+      </div>
+    </form>
+  </section>
+  {% endif %}
+
+  <section class="panel">
+    <h2>Note</h2>
+    <form method="post" action="{{ url_for('portal.post_action', ticket_id=ticket.id) }}" class="note-form">
+      {{ csrf_field() }}
+      <textarea name="note" rows="3" placeholder="Write a note for this ticket…"></textarea>
+      <div class="note-controls">
+        <label><input type="radio" name="note_visibility" value="internal" checked> Internal note</label>
+        <label><input type="radio" name="note_visibility" value="public"> Public reply to customer</label>
+        <button type="submit" {% if not tech or closed %}disabled{% endif %}>Post note</button>
+      </div>
+    </form>
+  </section>
+
+  {% if rma %}
+  <section class="panel">
+    <h2>Repair record</h2>
+    <dl class="record">
+      <dt>Added</dt><dd>{{ rma.added_at|localtime }} by {{ rma.added_by or '—' }}</dd>
+      {% if rma.problem_label %}<dt>Problem</dt><dd>{{ rma.problem_label }}{% if rma.problem_notes %} — {{ rma.problem_notes }}{% endif %}</dd>{% endif %}
+      {% if rma.solution_label %}<dt>Repair</dt><dd>{{ rma.solution_label }}{% if rma.work_done %} — {{ rma.work_done }}{% endif %}</dd>{% endif %}
+      {% if rma.tracking_number %}<dt>Tracking</dt><dd>{{ rma.tracking_number }}</dd>{% endif %}
+    </dl>
+    <table class="history">
+      {% for e in history %}
+      <tr>
+        <td class="when">{{ e.created_at|localtime }}</td>
+        <td>{{ e.label }}{% if e.detail and e.detail.note %} — <em>{{ e.detail.note }}</em>{% endif %}</td>
+        <td>{{ e.tech_name or '' }}</td>
+      </tr>
+      {% endfor %}
+    </table>
+  </section>
+  {% endif %}
+
+  {% if legacy_history %}
+  <section class="panel">
+    <h2>Earlier portal posts <span class="subtle">before this ticket was in the queue</span></h2>
+    <table class="history">
+      {% for row in legacy_history %}
+      <tr>
+        <td class="when">{{ row.created_at|localtime }}</td>
+        <td>{{ row.action_label }}{% if row.note_excerpt %} — <em>{{ row.note_excerpt }}</em>{% endif %}</td>
+        <td>{{ row.tech_initials or '' }}</td>
+      </tr>
+      {% endfor %}
+    </table>
+  </section>
+  {% endif %}
 {% endif %}
 {% endblock %}

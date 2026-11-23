@@ -6,6 +6,13 @@
       "runtimeExecutable": "venv\\Scripts\\python",
       "runtimeArgs": ["app.py"],
       "port": 5000
+    },
+    {
+      "name": "portal-demo",
+      "runtimeExecutable": "venv\\Scripts\\python",
+      "runtimeArgs": ["tests\\demo_server.py"],
+      "env": { "DEMO_DATABASE_URL": "postgresql://postgres:portal_dev@localhost:5434/portal_demo" },
+      "port": 5055
     }
   ]
 }

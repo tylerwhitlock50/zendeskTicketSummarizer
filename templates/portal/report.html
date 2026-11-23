@@ -1,47 +1,96 @@
 {% extends "portal/base.html" %}
-{% block title %}Portal tag report{% endblock %}
+{% block title %}Repair report{% endblock %}
 {% block content %}
-<h1>Portal tag report</h1>
-<p class="tagline">Live from Zendesk: every ticket tagged <code>{{ base_tag }}</code> ({{ total }} total).</p>
+<div class="page-head">
+  <h1>Repair report</h1>
+  <span class="range-nav">
+    <a href="{{ url_for('report.weekly', start=prev_start, end=prev_end) }}">&larr; Previous week</a>
+    <a href="{{ url_for('report.weekly', start=next_start, end=next_end) }}">Next week &rarr;</a>
+  </span>
+</div>
+<form method="get" class="range-form">
+  <label>From <input type="date" name="start" value="{{ start }}"></label>
+  <label>To <input type="date" name="end" value="{{ end }}"></label>
+  <button type="submit">Show</button>
+  <span class="downloads">
+    Download:
+    <a href="{{ url_for('report.rmas_csv', start=start, end=end) }}">RMAs (CSV)</a> &middot;
+    <a href="{{ url_for('report.events_csv', start=start, end=end) }}">All activity (CSV)</a>
+  </span>
+</form>
 
+{% if data is none %}
+<div class="notice warn">Database not configured. Set <code>DATABASE_URL</code> and run migrations.</div>
+{% else %}
+{% set t = data.turnaround %}
 <div class="report-counts">
   <div class="count-card">
-    <h2>By ticket status</h2>
+    <h2>This period</h2>
     <table>
-      {% for status, n in status_counts.items() %}
-      <tr><td><span class="badge status-{{ status }}">{{ status|capitalize }}</span></td><td>{{ n }}</td></tr>
+      <tr><td>Added to queue</td><td>{{ data.stage_counts.get('added', 0) }}</td></tr>
+      {% for key in board_stages if key != 'queued' %}
+      <tr><td>{{ stages[key] }}</td><td>{{ data.stage_counts.get(key, 0) }}</td></tr>
       {% endfor %}
     </table>
   </div>
   <div class="count-card">
-    <h2>By last action</h2>
+    <h2>Turnaround <span class="subtle">for {{ t.shipped }} shipped</span></h2>
+    {% macro days(v) %}{{ '%.1f days'|format(v) if v is not none else '—' }}{% endmacro %}
     <table>
-      {% for label, n in tag_counts %}
-      <tr><td>{{ label }}</td><td>{{ n }}</td></tr>
-      {% else %}
-      <tr><td class="empty">No action tags yet.</td><td></td></tr>
+      <tr><td>Added to shipped</td><td>{{ days(t.avg_total_days) }}</td></tr>
+      <tr><td>Received to shipped</td><td>{{ days(t.avg_shop_days) }}</td></tr>
+      <tr><td>Received to inspected</td><td>{{ days(t.avg_to_inspect_days) }}</td></tr>
+      <tr><td>Inspected to repaired</td><td>{{ days(t.avg_repair_days) }}</td></tr>
+      <tr><td>Repaired to shipped</td><td>{{ days(t.avg_to_ship_days) }}</td></tr>
+    </table>
+  </div>
+  <div class="count-card">
+    <h2>Open now</h2>
+    <table>
+      {% for key in board_stages if key != 'shipped' %}
+      <tr><td>{{ 'Waiting to receive' if key == 'queued' else stages[key] }}</td><td>{{ data.open_by_stage.get(key, 0) }}</td></tr>
       {% endfor %}
     </table>
   </div>
 </div>
 
+<div class="report-counts">
+  <div class="count-card">
+    <h2>Problems found</h2>
+    <table>
+      {% for r in data.problems %}<tr><td>{{ r.label }}</td><td>{{ r.n }}</td></tr>
+      {% else %}<tr><td class="empty">No inspections in this period.</td></tr>{% endfor %}
+    </table>
+  </div>
+  <div class="count-card">
+    <h2>Repairs done</h2>
+    <table>
+      {% for r in data.solutions %}<tr><td>{{ r.label }}</td><td>{{ r.n }}</td></tr>
+      {% else %}<tr><td class="empty">No repairs in this period.</td></tr>{% endfor %}
+    </table>
+  </div>
+</div>
+
+<h2 class="section-head">By person</h2>
 <table class="report-table">
   <thead>
-    <tr><th>Ticket</th><th>Subject</th><th>Status</th><th>Portal actions</th><th>Updated</th></tr>
+    <tr><th>Person</th><th>Added</th>
+      {% for key in board_stages if key != 'queued' %}<th>{{ stages[key] }}</th>{% endfor %}
+      <th>Other</th><th>Total</th></tr>
   </thead>
   <tbody>
-    {% for row in rows %}
+    {% for name, counts in data.techs.items() %}
     <tr>
-      <td><a href="{{ url_for('portal.action_page', ticket_id=row.id) }}">#{{ row.id }}</a>
-          <a class="subtle" href="{{ row.agent_url }}" target="_blank" rel="noopener">ZD</a></td>
-      <td>{{ row.subject or '(no subject)' }}</td>
-      <td><span class="badge status-{{ row.status }}">{{ (row.status or '?')|capitalize }}</span></td>
-      <td>{{ row.portal_tags|join(', ') }}</td>
-      <td>{{ row.updated_at|datefmt }}</td>
+      <td>{{ name }}</td>
+      <td>{{ counts.get('added', 0) }}</td>
+      {% for key in board_stages if key != 'queued' %}<td>{{ counts.get(key, 0) }}</td>{% endfor %}
+      <td>{{ counts.get('action', 0) + counts.get('note', 0) }}</td>
+      <td><strong>{{ counts.total }}</strong></td>
     </tr>
     {% else %}
-    <tr><td colspan="5" class="empty">No tickets carry the {{ base_tag }} tag yet.</td></tr>
+    <tr><td colspan="8" class="empty">No activity in this period.</td></tr>
     {% endfor %}
   </tbody>
 </table>
+{% endif %}
 {% endblock %}

@@ -1,0 +1,42 @@
+{% extends "portal/base.html" %}
+{% block title %}Incoming RMAs{% endblock %}
+{% block content %}
+<h1>Incoming</h1>
+<p class="tagline">Zendesk tickets tagged <code>{{ tag }}</code> that aren't in the repair queue yet.
+  Newly tagged tickets can take a minute or two to show up here.</p>
+
+<form action="{{ url_for('portal.scan_go') }}" method="get" class="lookup-form inline-lookup">
+  <input type="text" name="ticket_id" placeholder="Or scan / type a ticket number" autocomplete="off" inputmode="numeric" required>
+  <button type="submit">Open</button>
+</form>
+
+{% if rows is none %}
+<div class="notice warn">Database not configured. Set <code>DATABASE_URL</code> and run migrations.</div>
+{% else %}
+{% set tech = current_tech() %}
+{% if not tech %}
+<div class="notice warn"><a href="{{ url_for('portal.tech_signin', next=request.path) }}">Sign in</a> to add tickets to the queue.</div>
+{% endif %}
+<table class="report-table">
+  <thead><tr><th>Ticket</th><th>Subject</th><th>Status</th><th>Opened</th><th></th></tr></thead>
+  <tbody>
+  {% for t in rows %}
+    <tr>
+      <td><a href="{{ url_for('portal.action_page', ticket_id=t.id) }}">#{{ t.id }}</a></td>
+      <td>{{ t.subject or '(no subject)' }}</td>
+      <td><span class="badge status-{{ t.status }}">{{ (t.status or '?')|capitalize }}</span></td>
+      <td>{{ t.created_at|datefmt }}</td>
+      <td class="right">
+        <form method="post" action="{{ url_for('portal.add_to_queue', ticket_id=t.id) }}" class="inline-form">
+          {{ csrf_field() }}<input type="hidden" name="next" value="incoming">
+          <button type="submit" class="small-btn" {% if not tech %}disabled{% endif %}>Add to queue</button>
+        </form>
+      </td>
+    </tr>
+  {% else %}
+    <tr><td colspan="5" class="empty">Nothing waiting. Tag a ticket <code>{{ tag }}</code> in Zendesk to send it here.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+{% endblock %}
