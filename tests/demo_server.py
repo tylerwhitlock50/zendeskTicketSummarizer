@@ -12,6 +12,7 @@ Optional settings:
                     others can reach; run_demo.sh sets it for you)
     DEMO_HOST       address to listen on, default 127.0.0.1 (0.0.0.0 inside Docker)
     DEMO_PORT       port, default 5055
+    DEMO_BEHIND_PROXY  1 when an HTTPS proxy (Caddy) is in front; see run_demo.sh
 """
 
 import os
@@ -198,6 +199,17 @@ class PasswordGate:
 
 if os.environ.get("DEMO_PASSWORD"):
     app_module.app.wsgi_app = PasswordGate(app_module.app.wsgi_app, os.environ["DEMO_PASSWORD"])
+
+if os.environ.get("DEMO_BEHIND_PROXY") == "1":
+    # Behind Caddy (HTTPS): take the visitor's address and https scheme from the
+    # one proxy in front, so the password lockout is per visitor (not per proxy),
+    # links/QR codes use https, and session cookies are only sent over HTTPS.
+    # Only set this when the app is NOT reachable directly (run_demo.sh does so).
+    from werkzeug.middleware.proxy_fix import ProxyFix
+
+    app_module.app.wsgi_app = ProxyFix(app_module.app.wsgi_app, x_for=1, x_proto=1, x_host=1)
+    app_module.app.config["SESSION_COOKIE_SECURE"] = True
+    app_module.app.config["PREFERRED_URL_SCHEME"] = "https"
     print("Password gate is on: visitors are asked for DEMO_PASSWORD (any user name).", flush=True)
 
 if __name__ == "__main__":

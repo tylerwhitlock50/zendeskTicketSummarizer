@@ -2,10 +2,13 @@
 # throwaway database. Nothing is sent to Zendesk or any customer, and the
 # real .env (Zendesk/OpenAI credentials) is never read.
 #
-# Start it with ./run_demo.sh, which writes .env.demo (passwords) and sets up
-# the firewall. Only the web port is published; the database is reachable
-# from the app container only (Docker-published ports bypass ufw, so nothing
-# else is published on purpose).
+# Start it with ./run_demo.sh, which writes .env.demo (passwords), sets up the
+# firewall, and adds ONE of:
+#   docker-compose.demo-https.yml  Caddy in front with a real certificate (default)
+#   docker-compose.demo-http.yml   plain HTTP on DEMO_PUBLIC_PORT
+# Nothing in this file is published: the database is reachable from the app
+# only, and the app only through one of the files above. (Docker-published
+# ports bypass ufw, so nothing else is published on purpose.)
 services:
   demo-db:
     image: postgres:16
@@ -31,8 +34,6 @@ services:
       FLASK_SECRET_KEY: ${DEMO_SECRET_KEY:?run ./run_demo.sh}
       DEMO_HOST: 0.0.0.0
       DEMO_PORT: "5000"
-    ports:
-      - "${DEMO_PUBLIC_PORT:-80}:5000"
     depends_on:
       - demo-db
     restart: unless-stopped
