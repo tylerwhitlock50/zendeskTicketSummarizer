@@ -23,7 +23,7 @@
       <span class="card-subject">{{ r.subject or '(no subject)' }}</span>
       <span class="card-meta">{{ r.requester_name or '' }}</span>
       <span class="card-meta">{% if key == 'shipped' %}shipped{% else %}since{% endif %} {{ r.stage_since|localtime('%b %d') }}
-        {% if r.problem_label and key in ('inspected', 'repaired') %} &middot; {{ r.problem_label }}{% endif %}</span>
+        {% if r.problem_summary and key in ('inspected', 'repaired') %} &middot; {{ r.problem_summary }}{% endif %}</span>
     </a>
     {% else %}
     <p class="empty">None</p>

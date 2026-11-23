@@ -295,22 +295,22 @@ def test_inspected_needs_problem_and_keeps_notes_internal(client, zd, tech):
     trigger = _choice("problem", "Trigger")
     client.post(
         "/t/500/stage/inspected",
-        data={"problem_id": trigger["id"], "problem_notes": "Sear worn, internal note"},
+        data={"problem_ids": [trigger["id"]], "problem_notes": "Sear worn, internal note"},
     )
     assert "found the following: Trigger." in zd.updates[0]["body"]
     assert "Sear worn" not in zd.updates[0]["body"]
     rma = repair_db.get_rma(500)
-    assert rma["problem_label"] == "Trigger" and rma["problem_notes"] == "Sear worn, internal note"
+    assert rma["problem_summary"] == "Trigger" and rma["problem_notes"] == "Sear worn, internal note"
 
 
 @needs_db
 def test_repaired_uses_solution_when_work_done_blank(client, zd, tech):
     _add(client)
     sol = _choice("solution", "Adjusted trigger")
-    client.post("/t/500/stage/repaired", data={"solution_id": sol["id"], "work_done": ""})
+    client.post("/t/500/stage/repaired", data={"solution_ids": [sol["id"]], "work_done": ""})
     assert "Work performed: Adjusted trigger." in zd.updates[0]["body"]
     _add(client, 501)
-    client.post("/t/501/stage/repaired", data={"solution_id": sol["id"], "work_done": "Reset sear engagement"})
+    client.post("/t/501/stage/repaired", data={"solution_ids": [sol["id"]], "work_done": "Reset sear engagement"})
     assert "Work performed: Reset sear engagement." in zd.updates[1]["body"]
 
 
@@ -367,8 +367,8 @@ def test_ticket_page_offers_add_then_stages(client, zd, tech):
     assert resp.status_code == 200 and b"Add to repair queue" in resp.data
     _add(client)
     resp = client.get("/t/500")
-    assert b"Problem found" in resp.data and b"Return tracking number" in resp.data
-    assert b"Trigger" in resp.data  # problem drop-down option
+    assert b"Problems found" in resp.data and b"Return tracking number" in resp.data
+    assert b"Trigger" in resp.data  # problem checklist option
 
 
 @needs_db
@@ -407,7 +407,7 @@ def test_report_and_csv(client, zd, tech):
     _add(client)
     client.post("/t/500/stage/received")
     trig = _choice("problem", "Trigger")
-    client.post("/t/500/stage/inspected", data={"problem_id": trig["id"]})
+    client.post("/t/500/stage/inspected", data={"problem_ids": [trig["id"]]})
     client.post("/t/500/stage/shipped", data={"tracking_number": "1Z999AA10123456784"})
     today = repair_db_today()
     data = repair_db.report(today, today)
@@ -482,7 +482,7 @@ def test_earlier_stage_needs_move_back_and_resets_later_times(client, zd, tech, 
     _add(client)
     client.post("/t/500/stage/received")
     trig = _choice("problem", "Trigger")
-    client.post("/t/500/stage/inspected", data={"problem_id": trig["id"]})
+    client.post("/t/500/stage/inspected", data={"problem_ids": [trig["id"]]})
     client.post("/t/500/stage/shipped", data={"tracking_number": "1Z999AA10123456784"})
     sent = len(zd.updates)
 
@@ -622,3 +622,112 @@ def test_queue_card_date_ignores_notes(client, zd, tech):
     client.post("/t/500/action", data={"note": "still waiting", "note_visibility": "internal"})
     card = repair_db.board()["received"][0]
     assert (card["updated_at"] - card["stage_since"]).days >= 19
+
+
+# ---------------------------------------------------------------- multi-select + Other
+
+
+@needs_db
+def test_inspection_takes_several_problems_and_other(client, zd, tech):
+    _add(client)
+    trig = _choice("problem", "Trigger")
+    bolt = _choice("problem", "Bolt or action")
+    client.post(
+        "/t/500/stage/inspected",
+        data={"problem_ids": [trig["id"], bolt["id"]], "problem_other": "  Cracked   scope base "},
+    )
+    assert "found the following: Bolt or action, Trigger, Cracked scope base." in zd.updates[0]["body"] or \
+        "found the following: Trigger, Bolt or action, Cracked scope base." in zd.updates[0]["body"]
+    rma = repair_db.get_rma(500)
+    assert sorted(rma["problem_ids"]) == sorted([trig["id"], bolt["id"]])
+    assert rma["problem_other"] == "Cracked scope base"
+    assert rma["problem_summary"].endswith("Cracked scope base")
+    # not added to the list unless ticked
+    assert not any(c["label"] == "Cracked scope base" for c in repair_db.list_choices("problem"))
+
+
+@needs_db
+def test_other_alone_is_enough(client, zd, tech):
+    _add(client)
+    client.post("/t/500/stage/inspected", data={"problem_other": "Muzzle brake loose"})
+    assert "found the following: Muzzle brake loose." in zd.updates[0]["body"]
+
+
+@needs_db
+def test_other_can_be_added_to_the_list(client, zd, tech):
+    _add(client)
+    client.post(
+        "/t/500/stage/inspected",
+        data={"problem_other": "Muzzle brake loose", "problem_add": "1"},
+    )
+    added = _choice("problem", "Muzzle brake loose")
+    rma = repair_db.get_rma(500)
+    assert rma["problem_ids"] == [added["id"]] and rma["problem_other"] is None
+    # typing it again (any case) re-uses the same list item
+    _add(client, 501)
+    client.post("/t/501/stage/inspected", data={"problem_other": "muzzle BRAKE loose", "problem_add": "1"})
+    assert [c["label"].lower() for c in repair_db.list_choices("problem")].count("muzzle brake loose") == 1
+    assert repair_db.get_rma(501)["problem_ids"] == [added["id"]]
+
+
+@needs_db
+def test_repair_complete_is_multi_select_too(client, zd, tech):
+    _add(client)
+    rebed = _choice("solution", "Re-bedded action")
+    trig = _choice("solution", "Adjusted trigger")
+    client.post(
+        "/t/500/stage/repaired",
+        data={"solution_ids": [rebed["id"], trig["id"]], "solution_other": "Lapped lugs", "solution_add": "1"},
+    )
+    body = zd.updates[0]["body"]
+    assert "Work performed: " in body and "Re-bedded action" in body and "Lapped lugs" in body
+    rma = repair_db.get_rma(500)
+    assert len(rma["solution_ids"]) == 3 and rma["solution_other"] is None
+    _add(client, 501)
+    resp = client.post("/t/501/stage/repaired", data={}, follow_redirects=True)
+    assert b"Tick at least one repair done" in resp.data
+
+
+@needs_db
+def test_reposting_inspection_replaces_picks(client, zd, tech, monkeypatch):
+    monkeypatch.setattr(portal_views, "DUPLICATE_WINDOW_SECONDS", 0)
+    _add(client)
+    trig = _choice("problem", "Trigger")
+    bolt = _choice("problem", "Bolt or action")
+    sol = _choice("solution", "Adjusted trigger")
+    client.post("/t/500/stage/inspected", data={"problem_ids": [trig["id"], bolt["id"]]})
+    client.post("/t/500/stage/repaired", data={"solution_ids": [sol["id"]]})
+    client.post("/t/500/stage/inspected", data={"problem_ids": [bolt["id"]], "move_back": "1"})
+    rma = repair_db.get_rma(500)
+    assert rma["problem_ids"] == [bolt["id"]]
+    assert rma["solution_ids"] == [sol["id"]]  # the other list is untouched
+
+
+@needs_db
+def test_report_counts_each_pick_and_other_text(client, zd, tech):
+    trig = _choice("problem", "Trigger")
+    bolt = _choice("problem", "Bolt or action")
+    for tid, data in (
+        (500, {"problem_ids": [trig["id"], bolt["id"]]}),
+        (501, {"problem_ids": [trig["id"]], "problem_other": "Scope base"}),
+        (502, {"problem_other": "scope base"}),
+    ):
+        _add(client, tid)
+        client.post(f"/t/{tid}/stage/inspected", data=data)
+    today = repair_db_today()
+    counts = {r["label"]: r["n"] for r in repair_db.report(today, today)["problems"]}
+    assert counts["Trigger"] == 2 and counts["Bolt or action"] == 1
+    assert counts.get("Other: Scope base", 0) + counts.get("Other: scope base", 0) == 2
+    assert "(nothing recorded)" not in counts
+    csv_text = client.get(f"/report/rmas.csv?start={today}&end={today}").data.decode("utf-8-sig")
+    assert "problems" in csv_text.splitlines()[0] and "Scope base" in csv_text
+
+
+@needs_db
+def test_inactive_choice_cannot_be_ticked(client, zd, tech):
+    _add(client)
+    old = next(c for c in repair_db.list_choices("problem", include_inactive=True) if c["label"] == "Other")
+    assert old["active"] is False  # the seeded "Other" item is replaced by the free-text box
+    resp = client.post("/t/500/stage/inspected", data={"problem_ids": [old["id"]]}, follow_redirects=True)
+    assert b"Tick at least one problem found" in resp.data
+    assert zd.updates == []

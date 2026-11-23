@@ -76,12 +76,27 @@ def list_choices(kind: str, include_inactive: bool = False) -> list[dict[str, An
         ).fetchall()
 
 
-def get_choice(choice_id: int, kind: str) -> Optional[dict[str, Any]]:
+def get_active_choices(choice_ids: list[int], kind: str) -> list[dict[str, Any]]:
+    """The active list items of this kind among these ids, in list order."""
+    if not choice_ids:
+        return []
     with _conn() as conn:
         return conn.execute(
             "SELECT id, kind, label, position, active FROM repair.choice "
-            "WHERE id = %s AND kind = %s",
-            (choice_id, kind),
+            "WHERE id = ANY(%s) AND kind = %s AND active ORDER BY position, label",
+            (list(choice_ids), kind),
+        ).fetchall()
+
+
+def ensure_choice(kind: str, label: str) -> dict[str, Any]:
+    """Add a list item (a tech's "Other" text), or reuse and re-activate a match."""
+    with _conn() as conn:
+        return conn.execute(
+            "INSERT INTO repair.choice (kind, label, position) VALUES (%s, %s, "
+            "  (SELECT COALESCE(MAX(position), 0) + 10 FROM repair.choice WHERE kind = %s)) "
+            "ON CONFLICT (kind, lower(label)) DO UPDATE SET active = true "
+            "RETURNING id, kind, label, position, active",
+            (kind, label, kind),
         ).fetchone()
 
 
@@ -188,12 +203,22 @@ def get_tech_auth(tech_id: int) -> Optional[dict[str, Any]]:
 # ---------------------------------------------------------------- RMAs
 
 
-_RMA_SELECT = (
-    "SELECT r.*, p.label AS problem_label, s.label AS solution_label "
-    "FROM repair.rma r "
-    "LEFT JOIN repair.choice p ON p.id = r.problem_id "
-    "LEFT JOIN repair.choice s ON s.id = r.solution_id "
-)
+def _picked(kind: str) -> str:
+    """SQL for one RMA's picks of a kind: an id array and a 'A, B, other' summary."""
+    links = (
+        "FROM repair.rma_choice rc JOIN repair.choice c ON c.id = rc.choice_id "
+        f"WHERE rc.ticket_id = r.ticket_id AND c.kind = '{kind}'"
+    )
+    return (
+        f"ARRAY(SELECT rc.choice_id {links} ORDER BY c.position, c.label) AS {kind}_ids, "
+        f"NULLIF(concat_ws(', ', (SELECT string_agg(c.label, ', ' ORDER BY c.position, c.label) {links}), "
+        f"NULLIF(r.{kind}_other, '')), '') AS {kind}_summary"
+    )
+
+
+CHOICE_KINDS = ("problem", "solution")
+
+_RMA_SELECT = f"SELECT r.*, {_picked('problem')}, {_picked('solution')} FROM repair.rma r "
 
 
 def get_rma(ticket_id: int) -> Optional[dict[str, Any]]:
@@ -282,8 +307,9 @@ def record_stage(
     key = stage["key"]
     if key not in STAGE_KEYS:
         raise ValueError(f"unknown stage {key!r}")
-    allowed = {"problem_id", "problem_notes", "solution_id", "work_done", "tracking_number"}
+    allowed = {"problem_other", "problem_notes", "solution_other", "work_done", "tracking_number"}
     cols = {k: v for k, v in fields.items() if k in allowed}
+    picks = fields.get("picks")  # (kind, [choice ids]) for the inspection / repair forms
     moving_back = stage_index(key) < stage_index(current_stage)
     ts = _STAGE_TS[key]
     sets = [
@@ -303,6 +329,22 @@ def record_stage(
     params.append(ticket_id)
     conn.execute(f"UPDATE repair.rma SET {', '.join(sets)} WHERE ticket_id = %s", params)
     detail = dict(cols)
+    if picks:
+        kind, ids = picks
+        if kind not in CHOICE_KINDS:
+            raise ValueError(f"unknown list {kind!r}")
+        conn.execute(
+            "DELETE FROM repair.rma_choice rc USING repair.choice c "
+            "WHERE c.id = rc.choice_id AND c.kind = %s AND rc.ticket_id = %s",
+            (kind, ticket_id),
+        )
+        for cid in ids:
+            conn.execute(
+                "INSERT INTO repair.rma_choice (ticket_id, choice_id) VALUES (%s, %s) "
+                "ON CONFLICT DO NOTHING",
+                (ticket_id, cid),
+            )
+        detail[f"{kind}_ids"] = list(ids)
     if moving_back:
         detail["moved_back_from"] = current_stage
     if customer_message is None:
@@ -379,6 +421,33 @@ def _local_date(col: str) -> str:
     return f"({col} AT TIME ZONE '{REPORT_TZ}')::date"
 
 
+def _choice_counts(kind: str, stage_ts: str) -> str:
+    """Counts for one list over RMAs that reached the stage in range.
+
+    An RMA with three problems counts once under each. "Other" texts are
+    counted by their text so repeats stand out (and can be added to the list).
+    """
+    in_range = f"{_local_date('r.' + stage_ts)} BETWEEN %s AND %s"
+    return (
+        "SELECT label, n FROM ("
+        "  SELECT c.label AS label, count(*) AS n FROM repair.rma r "
+        "  JOIN repair.rma_choice rc ON rc.ticket_id = r.ticket_id "
+        f"  JOIN repair.choice c ON c.id = rc.choice_id AND c.kind = '{kind}' "
+        f"  WHERE {in_range} GROUP BY c.label "
+        "  UNION ALL "
+        f"  SELECT 'Other: ' || trim(r.{kind}_other), count(*) FROM repair.rma r "
+        f"  WHERE {in_range} AND COALESCE(trim(r.{kind}_other), '') <> '' "
+        f"  GROUP BY trim(r.{kind}_other) "
+        "  UNION ALL "
+        "  SELECT '(nothing recorded)', count(*) FROM repair.rma r "
+        f"  WHERE {in_range} AND COALESCE(trim(r.{kind}_other), '') = '' "
+        "    AND NOT EXISTS (SELECT 1 FROM repair.rma_choice rc JOIN repair.choice c ON c.id = rc.choice_id "
+        f"                    WHERE rc.ticket_id = r.ticket_id AND c.kind = '{kind}') "
+        "  HAVING count(*) > 0"
+        ") t ORDER BY n DESC, label"
+    )
+
+
 def report(start, end) -> dict[str, Any]:
     """Weekly/ad-hoc report for local dates start..end inclusive."""
     rng = (start, end)
@@ -403,20 +472,8 @@ def report(start, end) -> dict[str, Any]:
             f"AND {_local_date('shipped_at')} BETWEEN %s AND %s",
             rng,
         ).fetchone()
-        problems = conn.execute(
-            "SELECT COALESCE(c.label, '(none picked)') AS label, count(*) AS n "
-            "FROM repair.rma r LEFT JOIN repair.choice c ON c.id = r.problem_id "
-            f"WHERE {_local_date('r.inspected_at')} BETWEEN %s AND %s "
-            "GROUP BY 1 ORDER BY n DESC, label",
-            rng,
-        ).fetchall()
-        solutions = conn.execute(
-            "SELECT COALESCE(c.label, '(none picked)') AS label, count(*) AS n "
-            "FROM repair.rma r LEFT JOIN repair.choice c ON c.id = r.solution_id "
-            f"WHERE {_local_date('r.repaired_at')} BETWEEN %s AND %s "
-            "GROUP BY 1 ORDER BY n DESC, label",
-            rng,
-        ).fetchall()
+        problems = conn.execute(_choice_counts("problem", "inspected_at"), rng * 3).fetchall()
+        solutions = conn.execute(_choice_counts("solution", "repaired_at"), rng * 3).fetchall()
         by_tech = conn.execute(
             "SELECT COALESCE(tech_name, '(unknown)') AS tech, COALESCE(stage, kind) AS stage, "
             "count(*) AS n FROM repair.event "
@@ -450,10 +507,9 @@ def export_rmas(start, end) -> tuple[list[str], list[dict[str, Any]]]:
         return _with_columns(conn.execute(
             "SELECT r.ticket_id, r.subject, r.requester_name, r.requester_email, r.stage, "
             "r.added_by, r.added_at, r.received_at, r.inspected_at, r.repaired_at, r.shipped_at, "
-            "p.label AS problem, r.problem_notes, s.label AS solution, r.work_done, r.tracking_number "
-            "FROM repair.rma r "
-            "LEFT JOIN repair.choice p ON p.id = r.problem_id "
-            "LEFT JOIN repair.choice s ON s.id = r.solution_id "
+            "x.problem_summary AS problems, r.problem_notes, x.solution_summary AS solutions, "
+            "r.work_done, r.tracking_number "
+            f"FROM repair.rma r JOIN ({_RMA_SELECT}) x ON x.ticket_id = r.ticket_id "
             f"WHERE {_local_date('r.added_at')} BETWEEN %s AND %s "
             f"   OR {_local_date('r.updated_at')} BETWEEN %s AND %s "
             "ORDER BY r.added_at",
