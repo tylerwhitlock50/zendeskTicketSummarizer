@@ -1220,3 +1220,93 @@ button:disabled, .primary-btn:disabled, .action-btn:disabled, .small-btn:disable
   .kpi { padding: 6px 10px; }
   .kpi-value { font-size: 22px; }
 }
+
+/* ---- customer intake form ---- */
+/* The public page a customer opens from the emailed link (templates/intake).
+   Phone first: one column, 16px controls (smaller text makes iOS zoom in). */
+.portal-main input[type="tel"], .portal-main input[type="email"] {
+  min-height: 44px;
+  padding: 10px 12px;
+  font-size: 16px;
+  font-family: var(--font-body);
+  background: var(--surface);
+  color: var(--ink);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+}
+.intake-brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 56px;
+  padding: 0 20px;
+  background: var(--ink);
+  color: var(--canvas);
+}
+.intake-wordmark {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 18px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+.intake-wordmark::before { content: ""; width: 3px; height: 18px; background: var(--accent); }
+.intake-dept {
+  margin-left: auto;
+  font-family: var(--font-label);
+  font-weight: 600;
+  font-size: 12px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: #9A968C;
+}
+.intake-page .portal-main { max-width: 560px; margin: 28px auto 32px; padding: 0 16px; }
+.intake-page .portal-main h1 { font-size: 34px; margin: 6px 0 12px; }
+.intake-intro { margin: 0 0 20px; }
+.intake-intro p { font-size: 17px; line-height: 1.5; color: var(--ink-2); margin: 0 0 8px; }
+.intake-intro p.eyebrow { font-size: 13px; line-height: 1.2; color: var(--muted); margin: 0; }
+.intake-intro p.hint { font-size: 14px; color: var(--muted); }
+.intake-page .portal-main .panel p { line-height: 1.5; color: var(--ink-2); }
+
+.intake-form { padding: 0; gap: 0; }
+.intake-fields { display: flex; flex-direction: column; gap: 16px; }
+/* Questions read as sentences here, not as the staff screens' small caps. */
+.intake-form label, .intake-form .attach-row label {
+  font-family: var(--font-body);
+  font-size: 15px;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--ink);
+}
+.intake-form label .subtle { font-size: 14px; font-weight: 400; color: var(--muted); margin-top: -2px; }
+.intake-form .field-name .subtle { margin: 0 0 0 4px; }
+.intake-form input, .intake-form textarea { width: 100%; font-size: 16px; font-weight: 400; }
+.intake-form input[type="date"] { min-width: 0; -webkit-appearance: none; appearance: none; }
+.intake-form textarea { resize: vertical; }
+.intake-form .inline-fields label { flex: 1 1 180px; min-width: 0; }
+.intake-form .attach-row label { flex: 1 1 100%; min-width: 0; }
+.intake-form .attach-row input[type="file"] { max-width: 100%; }
+.field-error { color: var(--danger); font-size: 14px; font-weight: 600; }
+.intake-form .has-error input, .intake-form .has-error textarea { border-color: var(--accent); background: var(--accent-tint); }
+.intake-form .attach-row.has-error { border-color: var(--accent); }
+.intake-send { display: flex; flex-direction: column; gap: 10px; margin: 4px 0 0; }
+.intake-send .primary-btn { align-self: stretch; height: 56px; white-space: normal; }
+.intake-send .hint { margin: 0; text-align: center; }
+
+/* stacked: the question labels are too long for a label column on a phone */
+.intake-record { grid-template-columns: 1fr; gap: 2px 0; overflow-wrap: anywhere; }
+.intake-record dd { white-space: pre-line; margin-bottom: 12px; }
+.intake-record dd:last-child { margin-bottom: 0; }
+.intake-foot { max-width: 560px; margin: 0 auto 40px; padding: 0 16px; text-align: center; font-size: 14px; color: var(--muted); }
+@media (max-width: 480px) {
+  .intake-dept { display: none; }
+  .intake-page .portal-main h1 { font-size: 30px; }
+}
+
+/* "What best describes it?" tick boxes: big enough to hit with a thumb. */
+.intake-concerns .check-grid { grid-template-columns: repeat(auto-fill, minmax(124px, 1fr)); gap: 6px 8px; }
+.intake-form .intake-concerns .check-item { flex-direction: row; align-items: center; gap: 10px; min-height: 40px; font-weight: 500; }
+.intake-form .intake-concerns input[type="checkbox"] { width: 22px; height: 22px; flex: 0 0 22px; }

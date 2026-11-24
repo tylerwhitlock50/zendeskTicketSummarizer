@@ -16,6 +16,18 @@
 {% if columns is none %}
 <div class="notice warn">Database not configured. Set <code>DATABASE_URL</code> and run migrations.</div>
 {% else %}
+{% if intake_attention %}
+<div class="notice warn">
+  <strong>Customer intake forms that need a look:</strong>
+  {% for i in intake_attention %}
+  <a href="{{ url_for('portal.action_page', ticket_id=i.ticket_id) }}">#{{ i.ticket_id }}</a>{% if i.requester_name %} {{ i.requester_name }}{% endif %}
+  ({% if i.status == 'pending_link' %}link not sent: open the ticket and press Send link{% else %}answers not on the Zendesk ticket yet{% endif %}){{ ';' if not loop.last else '.' }}
+  {% endfor %}
+  <form method="post" action="{{ url_for('intake.intake_retry_failed') }}" class="inline-form">
+    {{ csrf_field() }}<button type="submit" class="secondary-btn" {% if not current_tech() %}disabled{% endif %}>Retry all</button>
+  </form>
+</div>
+{% endif %}
 <div class="board">
   {% for key in board_stages %}
   {% set items = columns.get(key, []) %}
@@ -32,6 +44,7 @@
       {% set model = r.model or r.zd_model %}{% set serial = r.serial_number or r.zd_serial %}
       {% if model or serial %}<span class="card-meta card-rifle">{{ model or '' }}{% if serial %} <span class="mono">{{ serial }}</span>{% endif %}</span>{% endif %}
       {% if r.flag %}<span class="flag-pill small">{{ r.flag }}</span>{% endif %}
+      {% if r.intake_status in ('link_sent', 'submitted', 'synced', 'sync_failed') %}<span class="flag-pill small">{% if r.intake_status == 'link_sent' %}form sent{% elif r.intake_status == 'sync_failed' %}form sync failed{% else %}form in{% endif %}</span>{% endif %}
       {% if key == 'shipped' %}
       <span class="card-meta">
         {% if r.delivered_at %}<span class="ok-tag">delivered {{ r.delivered_at|localtime('%b %d') }}</span>

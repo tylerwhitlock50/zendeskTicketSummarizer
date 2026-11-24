@@ -15,6 +15,10 @@ Optional settings:
     DEMO_SAMPLE_HISTORY  0 to start with an empty repair history; by default an empty
                     database gets ~4 months of made-up RMAs (tests/demo_history.py)
     DEMO_BEHIND_PROXY  1 when an HTTPS proxy (Caddy) is in front; see run_demo.sh
+    REPAIR_INTAKE_ENABLED  0 to switch the customer intake form off (it is on in the demo)
+    REPAIR_INTAKE_BASE_URL  address used in the intake link printed to the console;
+                    default http://127.0.0.1:<DEMO_PORT>. Set it to the public address
+                    when the demo runs on a server.
 """
 
 import os
@@ -31,6 +35,9 @@ os.environ["ZENDESK_SUBDOMAIN"] = "example"
 os.environ["ZENDESK_EMAIL"] = "demo@example.com"
 os.environ["ZENDESK_API_TOKEN"] = "demo"
 os.environ["OPENAI_API_KEY"] = "demo-disabled"  # the AI summary is switched off below
+# Customer intake form: on, so adding 7101-7104 prints a link that opens on this machine.
+os.environ.setdefault("REPAIR_INTAKE_ENABLED", "1")
+os.environ.setdefault("REPAIR_INTAKE_BASE_URL", f"http://127.0.0.1:{os.environ.get('DEMO_PORT', '5055')}")
 
 
 def _wait_for_database(dsn, seconds=60):
@@ -121,6 +128,7 @@ class DemoZendesk:
     def __init__(self):
         self.uploads = {}   # token -> (name, data, content_type)
         self.comments = {}  # ticket_id -> [comment]
+        self.tags = {}      # ticket_id -> [tag]
         self.next_id = 50000
 
     def get_ticket(self, ticket_id):
@@ -135,7 +143,8 @@ class DemoZendesk:
         custom = [{"id": fid, "value": v} for fid, v in zip(sorted(DEMO_FIELDS), values)]
         ticket = {"id": ticket_id, "subject": subject, "status": "open", "description": complaint,
                   "updated_at": "2026-11-23T16:00:00Z", "created_at": "2026-11-18T16:00:00Z",
-                  "custom_fields": custom, "ticket_form_id": None}
+                  "custom_fields": custom, "ticket_form_id": None,
+                  "tags": list(self.tags.get(ticket_id, [])), "requester_id": 1}
         return ticket, {"id": 1, "name": name, "email": "customer@example.com"}, None
 
     def upload_file(self, filename, data, content_type):
@@ -143,7 +152,8 @@ class DemoZendesk:
         self.uploads[token] = (filename, data, content_type)
         return token
 
-    def post_update(self, ticket_id, body, public=True, tags=None, custom_fields=None, uploads=None):
+    def post_update(self, ticket_id, body, public=True, tags=None, custom_fields=None, uploads=None,
+                    html_body=None, author_id=None):
         attachments = []
         for tok in uploads or []:
             name, data, ctype = self.uploads[tok]
@@ -151,11 +161,16 @@ class DemoZendesk:
             attachments.append({"id": self.next_id, "file_name": name, "content_type": ctype, "size": len(data),
                                 "content_url": f"demo://{tok}", "thumbnails": []})
         self.comments.setdefault(ticket_id, []).append(
-            {"author_id": 2, "public": public, "created_at": "2026-11-23T20:00:00Z", "attachments": attachments}
+            {"author_id": author_id or 2, "public": public, "created_at": "2026-11-23T20:00:00Z",
+             "body": body, "html_body": html_body, "attachments": attachments}
         )
+        have = self.tags.setdefault(ticket_id, [])
+        have.extend(t for t in tags or [] if t not in have)
         files = f" files={[a['file_name'] for a in attachments]}" if attachments else ""
+        who = f" author_id={author_id}" if author_id else ""
         print(f"[demo] ticket {ticket_id} {'PUBLIC' if public else 'internal'} tags={tags} "
-              f"fields={custom_fields}{files}\n        {body}", flush=True)
+              f"fields={custom_fields}{files}{who}\n        {html_body if html_body is not None else body}",
+              flush=True)
 
     def download(self, content_url, max_bytes=None):
         name, data, ctype = self.uploads[content_url.split("demo://", 1)[1]]

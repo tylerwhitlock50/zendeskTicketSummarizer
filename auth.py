@@ -39,9 +39,17 @@ def csrf_field() -> Markup:
     return Markup(f'<input type="hidden" name="_csrf" value="{csrf_token()}">')
 
 
+# Posts that carry their own unguessable key in the URL and use no session
+# (the customer intake form). Mail-app browsers often drop cookies, which
+# would otherwise leave the customer unable to send the form at all.
+CSRF_EXEMPT = {"intake.customer_submit"}
+
+
 def check_csrf() -> None:
     """before_request hook: reject state-changing requests without the token."""
     if request.method != "POST" or not current_app.config.get("CSRF_CHECK", True):
+        return
+    if request.endpoint in CSRF_EXEMPT:
         return
     sent = request.form.get("_csrf", "")
     expected = session.get("_csrf", "")

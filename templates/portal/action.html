@@ -107,13 +107,71 @@
   {% if not rma %}
   <section class="panel">
     <h2>Not in the repair queue</h2>
-    <p class="tagline">Add this ticket to start its repair record. Nothing is sent to the customer.</p>
+    <p class="tagline">Add this ticket to start its repair record. {% if intake_on %}The customer is emailed a link to the intake form.{% else %}Nothing is sent to the customer.{% endif %}</p>
     <form method="post" action="{{ url_for('portal.add_to_queue', ticket_id=ticket.id) }}">
       {{ csrf_field() }}
       <button type="submit" class="primary-btn" {% if not tech or closed %}disabled{% endif %}>Add to repair queue</button>
     </form>
   </section>
   {% else %}
+  {% if intake or intake_on %}
+  {% set st = intake.status if intake else None %}
+  <section class="panel">
+    <h2>Customer intake form <span class="subtle">the customer fills it in from an emailed link</span></h2>
+    {% if not intake %}
+      <p>No link has been sent for this ticket.</p>
+    {% elif st == 'pending_link' %}
+      <p>The link has <strong>not</strong> reached the customer yet.</p>
+    {% elif st == 'link_sent' %}
+      <p>Link emailed {{ intake.link_sent_at|localtime }}. Waiting for the customer.
+        <span class="subtle">The link works until {{ intake.expires_at|localtime('%b %d') }}.</span></p>
+    {% elif st == 'expired' %}
+      <p>The link ran out on {{ intake.expires_at|localtime('%b %d') }} before the customer answered.</p>
+    {% elif st == 'submitted' %}
+      <p>The customer answered {{ intake.submitted_at|localtime }}. The answers are saved here and are on their way to the Zendesk ticket.</p>
+    {% elif st == 'sync_failed' %}
+      <p>The customer answered {{ intake.submitted_at|localtime }}. The answers are saved here, but they are <strong>not</strong> on the Zendesk ticket yet.
+        <span class="subtle">{% if intake.next_attempt_at %}The portal tries again after {{ intake.next_attempt_at|localtime }}.{% else %}The portal has stopped trying; press Retry Zendesk once the problem is fixed.{% endif %}</span></p>
+    {% elif st == 'synced' %}
+      <p>The customer answered {{ intake.submitted_at|localtime }}. The answers are on the Zendesk ticket (added {{ intake.synced_at|localtime }}).</p>
+    {% endif %}
+    {% if intake and intake.last_error %}
+      <div class="notice warn">{{ intake.last_error }}</div>
+    {% endif %}
+
+    {% if st in ('submitted', 'sync_failed', 'synced') %}
+      {% if tech %}
+      <dl class="record">
+        {% if intake.answers.get('concerns') %}<dt>Concerns</dt><dd>{{ intake.answers.get('concerns')|join(', ') }}</dd>{% endif %}
+        {% for name, label, _required, _maxlen in intake_fields %}
+        {% if intake.answers.get(name) %}<dt>{{ label }}</dt><dd>{{ intake.answers.get(name) }}</dd>{% endif %}
+        {% endfor %}
+        {% if intake.file_count %}<dt>Photos</dt><dd>{{ intake.file_count }} waiting to go to Zendesk</dd>{% endif %}
+      </dl>
+      {% if st == 'synced' %}<p class="hint">Any photos the customer sent are under Photos and files below.</p>{% endif %}
+      {% else %}
+      <p class="hint">Sign in to see the answers.</p>
+      {% endif %}
+    {% endif %}
+
+    {% if st in ('submitted', 'sync_failed') %}
+    <form method="post" action="{{ url_for('intake.intake_retry', ticket_id=ticket.id) }}">
+      {{ csrf_field() }}
+      <button type="submit" class="secondary-btn" {% if not tech %}disabled{% endif %}>Retry Zendesk</button>
+    </form>
+    {% elif st != 'synced' %}
+    <form method="post" action="{{ url_for('intake.intake_send', ticket_id=ticket.id) }}">
+      {{ csrf_field() }}
+      <button type="submit" class="secondary-btn" {% if not tech or ticket.status in ('solved', 'closed') %}disabled{% endif %}>
+        {% if st in ('link_sent', 'expired') %}Send a new link{% else %}Send link{% endif %}</button>
+      <span class="subtle">
+        {% if ticket.status in ('solved', 'closed') %}The ticket is {{ ticket.status }} in Zendesk, so no link can be sent.
+        {% elif st == 'link_sent' %}Emails the customer a fresh link. The earlier one stops working.
+        {% else %}Emails the customer the link.{% endif %}</span>
+    </form>
+    {% endif %}
+  </section>
+  {% endif %}
   <section class="panel">
     <h2>Update the stage <span class="subtle">each one is posted to the Zendesk ticket</span></h2>
     <div class="stage-list">

@@ -1,0 +1,114 @@
+{% extends "intake/base.html" %}
+{% block title %}Tell us about your rifle{% endblock %}
+
+{# One labelled input. Required and max length come from intake.FIELDS (spec),
+   so the page and the server agree. #}
+{% macro field(name, label=None, type='text', hint=None, autocomplete='off', inputmode=None, placeholder=None, capitalize=None) %}
+{% set f = spec[name] %}
+<label class="{{ 'has-error' if errors.get(name) }}">
+  <span class="field-name">{{ label or f.label }}{% if not f.required %} <span class="subtle">optional</span>{% endif %}</span>
+  {% if hint %}<span class="subtle">{{ hint }}</span>{% endif %}
+  <input type="{{ type }}" name="{{ name }}" id="f-{{ name }}" value="{{ values.get(name, '') }}"
+         maxlength="{{ f.maxlen }}" autocomplete="{{ autocomplete }}"
+         {%- if inputmode %} inputmode="{{ inputmode }}"{% endif %}
+         {%- if placeholder %} placeholder="{{ placeholder }}"{% endif %}
+         {%- if capitalize %} autocapitalize="{{ capitalize }}"{% endif %}
+         {%- if f.required %} required{% endif %}
+         {%- if errors.get(name) %} aria-invalid="true" aria-describedby="e-{{ name }}"{% endif %}>
+  {% if errors.get(name) %}<span class="field-error" id="e-{{ name }}">{{ errors[name] }}</span>{% endif %}
+</label>
+{% endmacro %}
+
+{% macro area(name, label, hint=None, rows=5, placeholder=None) %}
+{% set f = spec[name] %}
+<label class="{{ 'has-error' if errors.get(name) }}">
+  <span class="field-name">{{ label }}{% if not f.required %} <span class="subtle">optional</span>{% endif %}</span>
+  {% if hint %}<span class="subtle">{{ hint }}</span>{% endif %}
+  <textarea name="{{ name }}" id="f-{{ name }}" rows="{{ rows }}" maxlength="{{ f.maxlen }}"
+            {%- if placeholder %} placeholder="{{ placeholder }}"{% endif %}
+            {%- if f.required %} required{% endif %}
+            {%- if errors.get(name) %} aria-invalid="true" aria-describedby="e-{{ name }}"{% endif %}>{{ values.get(name, '') }}</textarea>
+  {% if errors.get(name) %}<span class="field-error" id="e-{{ name }}">{{ errors[name] }}</span>{% endif %}
+</label>
+{% endmacro %}
+
+{% block content %}
+<div class="intake-intro">
+  <p class="eyebrow">Repair intake</p>
+  <h1>Tell us about your rifle</h1>
+  <p>We're preparing to receive your firearm. A few details now help our gunsmiths get straight to work
+     when it arrives. Let us know if there is anything specific you'd like us to look at, or any specific
+     concerns.</p>
+  <p class="hint">It takes about three minutes. Skip anything marked optional.</p>
+</div>
+
+{% if notice %}
+<div class="notice warn" role="status">{{ notice }}</div>
+{% endif %}
+{% if errors %}
+<div class="notice warn" role="alert">
+  <strong>Almost there.</strong>
+  {% if errors|length == 1 and errors.get('photos') %}{{ errors.photos }}{% else %}Please check the highlighted {{ 'field' if errors|length == 1 else 'fields' }} below.{% endif %}
+  Your answers are still here, but any photos need to be picked again.
+</div>
+{% endif %}
+
+<form method="post" enctype="multipart/form-data" class="stage-form intake-form">
+  <section class="panel">
+    <h2>Your rifle</h2>
+    <div class="intake-fields">
+      {{ field('model', placeholder='e.g. Ridgeline FFT') }}
+      {{ field('serial', hint='Stamped on the receiver.', capitalize='characters') }}
+      <div class="inline-fields">
+        {{ field('caliber', placeholder='e.g. 6.5 PRC') }}
+        {{ field('barrel_length', placeholder='e.g. 20 in') }}
+      </div>
+      <div class="inline-fields">
+        {{ field('purchase_date', 'Purchase date (roughly)', type='date') }}
+        {{ field('round_count', placeholder='e.g. about 300') }}
+      </div>
+      {{ field('ammo', placeholder='Brand and load') }}
+      {{ field('optic', hint='If a scope or mount is coming with the rifle.') }}
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>What's going on</h2>
+    <div class="intake-fields">
+      {% if concerns %}
+      <fieldset class="checklist intake-concerns">
+        <legend>What best describes it? <span class="subtle">tick all that apply</span></legend>
+        <div class="check-grid">
+          {% for c in concerns %}
+          <label class="check-item"><input type="checkbox" name="concerns" value="{{ c }}"
+            {%- if c in values.get('concerns', []) %} checked{% endif %}> <span>{{ c }}</span></label>
+          {% endfor %}
+        </div>
+      </fieldset>
+      {% endif %}
+      {{ area('issue', 'What is the rifle doing?', hint='When it happens, how often, and anything you have already tried.') }}
+      {{ area('check_specific', "Anything specific you'd like us to look at, or any concerns?", rows=4) }}
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>Photos <span class="subtle">optional</span></h2>
+    <div class="intake-fields">
+      <div class="attach-row {{ 'has-error' if errors.get('photos') }}">
+        <label>Add photos
+          <span class="subtle">Up to {{ max_photos }}, {{ max_photo_mb }} MB each. Targets, damage, or anything that shows the problem.</span>
+          <input type="file" name="photos" id="f-photos" multiple
+                 accept="image/jpeg,image/png,image/webp,image/heic,image/heif,application/pdf,.jpg,.jpeg,.png,.webp,.heic,.heif,.pdf"
+                 {%- if errors.get('photos') %} aria-invalid="true" aria-describedby="e-photos"{% endif %}>
+          {% if errors.get('photos') %}<span class="field-error" id="e-photos">{{ errors.photos }}</span>{% endif %}
+        </label>
+      </div>
+    </div>
+  </section>
+
+  <div class="intake-send">
+    <button type="submit" class="primary-btn" data-label="Send to the repair team">Send to the repair team</button>
+    <p class="hint">Your answers go straight to the Christensen Arms repair team and are added to your repair ticket.</p>
+  </div>
+</form>
+{% endblock %}

@@ -19,6 +19,7 @@ import auth
 import db
 import delivery
 import files
+import intake
 import repair_db
 import repair_settings
 import tracking
@@ -222,6 +223,7 @@ def queue():
         board_stages=repair_db.BOARD_STAGES,
         status_words=tracking.STATUS_WORDS,
         tracking_service=tracking.provider_ready(),
+        intake_attention=intake.needs_attention() if db.available() else [],
     )
 
 
@@ -274,7 +276,17 @@ def add_to_queue(ticket_id):
             _get_zendesk().add_tags(ticket_id, [portal_tag(), QUEUED_TAG])
         except ZendeskError:
             logger.warning("Could not tag ticket %s %s; it may linger on Incoming", ticket_id, QUEUED_TAG)
-        flash(f"Added ticket #{ticket_id} to the repair queue. Print its sheet to go with the rifle.", "success")
+        msg = f"Added ticket #{ticket_id} to the repair queue. Print its sheet to go with the rifle."
+        try:
+            outcome = intake.send_link(_get_zendesk(), ticket, requester, tech)
+        except Exception:  # the add must never fail because of the intake link
+            logger.exception("Intake link for ticket %s failed", ticket_id)
+            outcome = "failed"
+        if outcome == "sent":
+            msg += " The customer was emailed the intake form link."
+        flash(msg, "success")
+        if outcome in ("failed", "no_base_url", "bad_go_live"):
+            flash("The intake form link was not sent to the customer. Use Send link on the ticket page.", "error")
     else:
         flash(f"Ticket #{ticket_id} was already in the repair queue.", "success")
     if request.form.get("next") == "incoming":
@@ -355,6 +367,9 @@ def action_page(ticket_id):
         status_words=tracking.STATUS_WORDS,
         tracking_service=tracking.provider_ready(),
         final_check_ok=_final_check_ok(rma) if rma else True,
+        intake=intake.for_ticket(ticket_id) if rma else None,
+        intake_on=intake.enabled(),
+        intake_fields=intake.FIELDS,
     )
     return render_template("portal/action.html", **ctx)
 

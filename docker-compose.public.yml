@@ -1,0 +1,29 @@
+# The internet-facing copy: the customer intake form and nothing else
+# (e.g. repairs.yourcompany.com). Every staff page answers 404 here.
+#
+#   docker compose -f docker-compose.public.yml up -d --build
+#
+# Its .env needs DATABASE_URL (the SAME database as the staff portal),
+# FLASK_SECRET_KEY, and the ZENDESK_* settings so a customer's answers go
+# straight onto their ticket. Without the Zendesk settings the answers are
+# still saved, and the staff portal's delivery-checker adds them to the ticket
+# on its next pass.
+#
+# Put HTTPS in front (Caddy, nginx, or a DigitalOcean load balancer) and point
+# it at port 5000. Set REPAIR_INTAKE_BASE_URL on the STAFF portal to this
+# host's public https address: that is the address the emailed links use.
+services:
+  intake-form:
+    build: .
+    ports:
+      - "127.0.0.1:5000:5000"   # reachable only through the HTTPS proxy on this machine
+    env_file: .env
+    environment:
+      PORTAL_PUBLIC_ONLY: "1"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/healthz', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s

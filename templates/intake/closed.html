@@ -1,0 +1,16 @@
+{% extends "intake/base.html" %}
+{% block title %}{{ title }}{% endblock %}
+{% block content %}
+{# One page for every dead end: a bad or expired link, too many tries, files
+   too big, or the form being unavailable. No ticket numbers, no staff links. #}
+<div class="intake-intro">
+  <p class="eyebrow">Repair intake</p>
+  <h1>{{ title }}</h1>
+  <p>{{ message }}</p>
+</div>
+<section class="panel">
+  <h2>Need a hand?</h2>
+  <p>Reply to the email we sent you and our repair team will send a fresh link, or take your details
+     by email instead.</p>
+</section>
+{% endblock %}

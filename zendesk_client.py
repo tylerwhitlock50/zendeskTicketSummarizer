@@ -64,14 +64,22 @@ class ZendeskClient:
         payload = {"ticket": {"comment": {"body": body, "public": bool(public)}}}
         return self._request("PUT", f"/tickets/{ticket_id}.json", json=payload)
 
-    def post_update(self, ticket_id, body, public=True, tags=None, custom_fields=None, uploads=None):
+    def post_update(self, ticket_id, body, public=True, tags=None, custom_fields=None, uploads=None,
+                    html_body=None, author_id=None):
         """Comment, add tags and set custom fields in ONE ticket update.
 
         One request means the customer email and the tag/field change land
         together: there is no half-applied state if the second call would
         have failed. ``additional_tags`` appends without replacing existing tags.
+        ``html_body`` replaces ``body`` (already-escaped HTML); ``author_id``
+        posts the comment as that user, e.g. the requester for their own answers.
         """
-        ticket = {"comment": {"body": body, "public": bool(public)}}
+        if html_body is not None:
+            ticket = {"comment": {"html_body": html_body, "public": bool(public)}}
+        else:
+            ticket = {"comment": {"body": body, "public": bool(public)}}
+        if author_id:
+            ticket["comment"]["author_id"] = author_id
         if uploads:
             ticket["comment"]["uploads"] = list(uploads)  # tokens from upload_file()
         if tags:

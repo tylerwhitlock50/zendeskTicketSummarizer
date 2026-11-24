@@ -226,13 +226,15 @@ def _picked(kind: str) -> str:
     )
 
 
-CHOICE_KINDS = ("problem", "solution", "accessory", "inspection_point", "root_cause")
+CHOICE_KINDS = ("problem", "solution", "accessory", "inspection_point", "root_cause", "concern")
 
 _RMA_SELECT = (
     f"SELECT r.*, {_picked('problem')}, {_picked('solution')}, {_picked('accessory')}, "
     "(SELECT label FROM repair.choice WHERE id = r.root_cause_id) AS root_cause, "
-    "fr.sent_at AS report_sent_at, fr.body IS NOT NULL AS report_edited "
+    "fr.sent_at AS report_sent_at, fr.body IS NOT NULL AS report_edited, "
+    "ri.status AS intake_status "
     "FROM repair.rma r LEFT JOIN repair.final_report fr ON fr.ticket_id = r.ticket_id "
+    "LEFT JOIN repair.intake ri ON ri.ticket_id = r.ticket_id "
 )
 
 # Form columns a stage may write (everything else in ``fields`` is ignored).
