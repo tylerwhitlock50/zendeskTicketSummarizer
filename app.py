@@ -30,12 +30,33 @@ from admin_views import admin_bp
 from portal_views import portal_bp
 from report_views import report_bp
 from atf_views import atf_bp
+import intake_views
+from intake_views import intake_bp
 
 app.config["MAX_CONTENT_LENGTH"] = 120 * 1024 * 1024  # several phone photos per post
 app.register_blueprint(portal_bp)
 app.register_blueprint(admin_bp)
 app.register_blueprint(report_bp)
 app.register_blueprint(atf_bp)
+app.register_blueprint(intake_bp)
+
+
+def _public_only():
+    """PORTAL_PUBLIC_ONLY=1: this copy faces the internet (e.g. repairs.example.com)
+    and serves the customer intake form and nothing else. The staff portal runs
+    as a second copy, without the setting, on the same database."""
+    if os.environ.get("PORTAL_PUBLIC_ONLY", "").strip().lower() not in ("1", "true", "yes", "on"):
+        return None
+    path = request.path
+    if path.startswith(intake_views.PUBLIC_PREFIX) or path.startswith("/static/") or path == "/healthz":
+        return None
+    return "Not found", 404, {"Content-Type": "text/plain; charset=utf-8"}
+
+
+app.before_request(_public_only)
+# Before check_csrf, which parses the whole upload: the customer form's guard
+# turns away floods, oversized posts and dead links first.
+app.before_request(intake_views.guard_request)
 app.before_request(auth.check_csrf)
 
 
@@ -118,9 +139,19 @@ def initials(name):
 
 @app.errorhandler(413)
 def too_large(_exc):
+    if request.path.startswith(intake_views.PUBLIC_PREFIX):
+        return intake_views.too_large_page(_exc)
     return render_template(
         "error.html", ticket_id=None, message="Those files are too big to upload together (120 MB max). Attach fewer at a time."
     ), 413
+
+
+@app.errorhandler(400)
+def bad_request(exc):
+    """The customer form gets its typed answers back; every other page keeps the plain 400."""
+    if request.path.startswith(intake_views.PUBLIC_PREFIX):
+        return intake_views.bad_request_page(exc)
+    return exc
 
 
 @app.template_filter("localtime")
@@ -129,6 +160,11 @@ def localtime(value, fmt="%b %d %I:%M %p"):
     if not value:
         return "—"
     return value.astimezone(ZoneInfo(REPORT_TZ)).strftime(fmt)
+
+
+@app.route("/healthz")
+def healthz():
+    return "ok", 200, {"Content-Type": "text/plain; charset=utf-8"}
 
 
 @app.route("/")

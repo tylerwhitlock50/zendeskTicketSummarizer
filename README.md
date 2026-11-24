@@ -10,6 +10,8 @@ and sends the emails; this app keeps the shop-side repair record.
 2. **Incoming**: CS tags an approved RMA ticket `repair_process` in Zendesk.
    `/incoming` runs a Zendesk search for that tag and lists tickets not yet in
    the queue; adding one starts its repair record (nothing is sent to the customer).
+   With `REPAIR_INTAKE_ENABLED` on, adding a ticket also emails the customer a
+   private link to the **intake form** (see "Customer intake form" below).
 3. **Stage screen**: scan the sheet (or the rifle's serial, or the box's
    tracking label) to open `/t/<id>` and post a stage. Each form is a QC step:
    - **Received**: chamber/magazine safety check, serial scanned from the rifle
@@ -88,6 +90,12 @@ Values in `.env`:
 | `FLASK_SECRET_KEY` | Random string in production (sessions, sign-ins, CSRF) |
 | `TRACKING_PROVIDER` | `easypost` or `shippo` to detect deliveries automatically. Unset → "Mark delivered" by hand |
 | `EASYPOST_API_KEY` / `SHIPPO_API_KEY` | The tracking service's API key |
+| `REPAIR_INTAKE_ENABLED` | `1` / `true` / `yes` / `on` to email the customer the intake form link when a ticket is added to the queue. Default off |
+| `REPAIR_INTAKE_GO_LIVE_AT` | Only tickets created in Zendesk on or after this date/time get a link, e.g. `2026-12-01T08:00:00Z` (no time zone = UTC). Unset → no cutoff. A value that can't be read → no links are sent |
+| `REPAIR_INTAKE_BASE_URL` | Public address of the intake form, e.g. `https://repairs.yourcompany.com`. Unset → no link is sent (`PORTAL_BASE_URL` is the shop-network address and is never used for this) |
+| `PORTAL_PUBLIC_ONLY` | `1` on the internet-facing copy only: it serves the customer intake form (`/repair/intake/*`) and nothing else. Unset on the staff portal |
+| `ZENDESK_INTAKE_SERIAL_FIELD_ID` / `ZENDESK_INTAKE_MODEL_FIELD_ID` / `ZENDESK_INTAKE_CALIBER_FIELD_ID` | Optional ids of Zendesk text fields to fill from the customer's answers. Blank → that field is skipped |
+| `REPAIR_INTAKE_REMINDER_HOURS` | Hours after the link before one reminder is sent (e.g. `48`). Default `0` = no reminder |
 
 With `DATABASE_URL` set, create the tables (also run automatically on container
 start):
@@ -116,6 +124,54 @@ Then open **Settings** (`/admin/`) and:
    `ZENDESK_STAGE_FIELD_ID`, and enter each option's value on the stage in Settings.
 5. Post one stage on a test ticket you own and confirm the email arrives.
 
+### Customer intake form
+
+Off until `REPAIR_INTAKE_ENABLED` is set. When it is on:
+
+- **Add to repair queue** posts one public comment on the ticket with a private
+  link (`/repair/intake/<token>`) and the tag `repair_intake_sent`. Zendesk
+  emails it to the customer. One link per ticket; it works for 30 days.
+- The customer fills in the rifle details, what's going on, anything specific
+  they want looked at, and up to 6 photos (20 MB each). Tick boxes for the
+  common problems (accuracy, pressure signs, feeding, ...) make the ticket easy
+  to sort; edit the list under Settings. The form asks for no name, address
+  or phone number: contact details stay with customer service in Zendesk.
+  No sign-in is needed: the link is the key.
+- The answers are saved in the portal first, then added to the same ticket as
+  a comment from the customer, with the photos and the tag
+  `repair_intake_received`. If Zendesk refuses, the answers stay saved and the
+  portal tries again.
+- The ticket page has a **Customer intake form** panel: where the form stands,
+  the answers (signed-in staff only), **Send link** / **Send a new link** and
+  **Retry Zendesk**. A new link replaces the old one. The queue shows which
+  tickets have a form out or in, and lists the ones that need a look, with
+  **Retry all**.
+- Tickets already in the queue when the form is switched on get no link unless
+  a tech presses **Send link**. Solved and closed tickets never get one.
+- The model, serial and caliber the customer types do not change the repair
+  record or the A&D log. The tech still verifies them at **Received**.
+
+Before turning it on:
+
+1. Tell CS and the techs: **Add to repair queue** now emails the customer.
+2. The form has to be reachable from the customer's phone, and the rest of the
+   portal must not be. Run a second copy of the app for the internet with
+   `PORTAL_PUBLIC_ONLY=1` (`docker-compose.public.yml`), pointed at the same
+   database, e.g. on `repairs.yourcompany.com`. That copy serves the customer
+   form and nothing else: every staff page answers 404. Set
+   `REPAIR_INTAKE_BASE_URL` on the staff portal to its public https address.
+   The staff portal itself has no login on its read pages, so keep it on the
+   shop network or behind a VPN / access proxy, never open on the internet.
+3. Zendesk must email the requester for the link comment: the standard
+   comment-update trigger does it, or add a trigger on the tag
+   `repair_intake_sent`. Add a test ticket you own and confirm the email arrives.
+4. The answers are posted as the customer, so the API user must be allowed to
+   set a comment's author. Fill in the form on the test
+   ticket and confirm the comment and photos appear on it.
+5. Keep the `delivery-checker` container running. It also retries links and
+   answers that Zendesk did not take, every 30 minutes. Without it, retries
+   happen only when someone presses the buttons.
+
 ## Run
 
 ```powershell
@@ -142,7 +198,9 @@ to the console, never sent) and a throwaway database. It seeds "Demo Tech", PIN 
 and, on an empty database, about four months of made-up repair history (tickets 6001
 and up, `tests/demo_history.py`) so the report, queue and final reports have something
 to show. Tickets 7101-7104 are left for you to add from Incoming. Set
-`DEMO_SAMPLE_HISTORY=0` to start empty.
+`DEMO_SAMPLE_HISTORY=0` to start empty. The customer intake form is on in the
+demo: adding one of those tickets prints its link in the console; open it to
+fill in the form as the customer would.
 
 ```powershell
 $env:DEMO_DATABASE_URL = "postgresql://postgres:portal_dev@localhost:5433/portal_demo"
@@ -181,8 +239,9 @@ docker compose up -d --build
 ```
 
 This also starts `delivery-checker`, which checks return tracking every 30
-minutes (`python delivery.py --loop 1800`) and idles until `TRACKING_PROVIDER`
-is set. Run one pass by hand with `python delivery.py`.
+minutes (`python delivery.py --loop 1800`); that part idles until
+`TRACKING_PROVIDER` is set. The same loop retries customer intake links and
+answers that Zendesk did not take. Run one pass by hand with `python delivery.py`.
 
 Dev overlay with a local Postgres (port 5433):
 

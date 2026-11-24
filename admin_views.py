@@ -26,6 +26,7 @@ LIST_TITLES = (
     ("problem", "Problems found (Inspected)"),
     ("solution", "Repairs done (Repair complete)"),
     ("root_cause", "Root causes (Repair complete)"),
+    ("concern", "Customer concerns (intake form tick boxes)"),
 )
 
 

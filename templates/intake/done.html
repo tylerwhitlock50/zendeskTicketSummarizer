@@ -1,0 +1,30 @@
+{% extends "intake/base.html" %}
+{% block title %}Thanks, we have it{% endblock %}
+{% block content %}
+<div class="intake-intro">
+  <p class="eyebrow">Repair intake</p>
+  <h1>Thanks, we have it.</h1>
+  <p>Your answers are with the Christensen Arms repair team and will be waiting with your repair ticket
+     when your rifle arrives. There's nothing more you need to do here.</p>
+</div>
+
+<section class="panel">
+  <h2>What you told us</h2>
+  <dl class="record intake-record">
+    {% for label, value in shown %}
+    <dt>{{ label }}</dt>
+    <dd>{{ value }}</dd>
+    {% endfor %}
+    {% if photo_count %}
+    <dt>Photos</dt>
+    <dd>{{ photo_count }} attached</dd>
+    {% endif %}
+  </dl>
+</section>
+
+<section class="panel">
+  <h2>What happens next</h2>
+  <p>We'll email you when your rifle arrives and again at each step of the repair.</p>
+  <p>Need to add or change something? Just reply to the email we sent you.</p>
+</section>
+{% endblock %}

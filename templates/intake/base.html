@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="robots" content="noindex, nofollow">
+  <meta name="referrer" content="no-referrer">
+  <meta name="format-detection" content="telephone=no">
+  <title>{% block title %}Repair intake{% endblock %} · Christensen Arms</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Barlow+Semi+Condensed:wght@500;600&family=Barlow:wght@400;500;600;700&display=swap">
+  <link rel="stylesheet" href="{{ url_for('static', filename='theme.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='print.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='portal.css') }}">
+</head>
+<body class="portal-page intake-page">
+  {# Customer-facing: no staff nav, no links into the portal. #}
+  <header class="intake-brand">
+    <span class="intake-wordmark">Christensen Arms</span>
+    <span class="intake-dept">Repair service</span>
+  </header>
+  <main class="portal-main">
+    {% block content %}{% endblock %}
+  </main>
+  <footer class="intake-foot">
+    <p>Questions? Just reply to the email we sent you.</p>
+  </footer>
+  <script>
+    // One tap = one send. Photos can take a while on a phone, so say so.
+    document.addEventListener("submit", function (e) {
+      if (e.defaultPrevented) return;
+      var button = e.target.querySelector("button[type=submit]");
+      if (!button) return;
+      setTimeout(function () {
+        button.disabled = true;
+        button.textContent = "Sending… keep this page open";
+      }, 0);
+    });
+    // Coming back with the Back button must not leave the button stuck.
+    window.addEventListener("pageshow", function () {
+      document.querySelectorAll("button[type=submit][data-label]").forEach(function (b) {
+        b.disabled = false;
+        b.textContent = b.getAttribute("data-label");
+      });
+    });
+  </script>
+</body>
+</html>

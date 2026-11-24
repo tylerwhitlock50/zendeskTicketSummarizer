@@ -35,6 +35,43 @@ DEFAULTS = {
         "Good news: {carrier} shows your rifle was delivered on {delivered_date} "
         "(tracking {tracking}). Thank you for your patience. If anything isn't right, just reply to this email."
     ),
+    # Customer intake form (intake.py). Placeholders: {first_name} {ticket_id} {link} {days}
+    "intake_link_message": (
+        "Hi {first_name},\n"
+        "\n"
+        "We're preparing to receive your firearm. Before it arrives, please take a couple of minutes to "
+        "tell us about it, and let us know if there is anything specific you'd like us to look at or any "
+        "specific concerns you have:\n"
+        "\n"
+        "{link}\n"
+        "\n"
+        "You can add photos from your phone. The link is just for you and works for {days} days. "
+        "If you'd rather just reply to this email, that works too.\n"
+        "\n"
+        "Christensen Arms Repair"
+    ),
+    "intake_resend_message": (
+        "Hi {first_name},\n"
+        "\n"
+        "Here is a fresh link to the form about your firearm. Please use this one; the earlier one no "
+        "longer works:\n"
+        "\n"
+        "{link}\n"
+        "\n"
+        "It is just for you and works for {days} days. If you'd rather just reply to this email, "
+        "that works too.\n"
+        "\n"
+        "Christensen Arms Repair"
+    ),
+    "intake_reminder_message": (
+        "Hi {first_name},\n"
+        "\n"
+        "A quick reminder: we sent you a link to a short form about your firearm. If you have a couple of "
+        "minutes, filling it in helps our technicians know what to look at. The link is in our earlier "
+        "email. If you'd rather just reply here and tell us, that works too.\n"
+        "\n"
+        "Christensen Arms Repair"
+    ),
     "final_report_template": (
         "Repair report for ticket #{ticket_id}\n"
         "\n"

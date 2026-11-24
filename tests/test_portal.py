@@ -71,6 +71,10 @@ class FakeZendesk:
         self.uploaded = {}
         self.comments = {}
         self.custom_fields = []  # [{"id", "value"}] on every ticket
+        self.tags = []
+        self.created_at = "2026-11-01T10:00:00Z"
+        self.fail_status = 422    # status of the error raised while self.fail is set
+        self.fail_fields = False  # reject (422) any update that sets custom fields
         self.fields = {
             301: {"id": 301, "title": "Serial number", "active": True},
             302: {"id": 302, "title": "Model", "active": True,
@@ -85,8 +89,10 @@ class FakeZendesk:
             "subject": "Rifle will not group",
             "status": self.status,
             "updated_at": "2026-11-20T10:00:00Z",
-            "created_at": "2026-11-01T10:00:00Z",
+            "created_at": self.created_at,
             "custom_fields": list(self.custom_fields),
+            "tags": list(self.tags),
+            "requester_id": 1,
             "description": "My rifle won't group under 3 MOA since the last trip.",
         }
         requester = {"id": 1, "name": "Jane Hunter", "email": "jane@example.com"}
@@ -106,9 +112,12 @@ class FakeZendesk:
                 return data, ctype
         raise portal_views.ZendeskError("not found", status=404)
 
-    def post_update(self, ticket_id, body, public=True, tags=None, custom_fields=None, uploads=None):
+    def post_update(self, ticket_id, body, public=True, tags=None, custom_fields=None, uploads=None,
+                    html_body=None, author_id=None):
         if self.fail:
-            raise portal_views.ZendeskError("Zendesk API error 422: closed", status=422)
+            raise portal_views.ZendeskError(f"Zendesk API error {self.fail_status}: closed", status=self.fail_status)
+        if self.fail_fields and custom_fields:
+            raise portal_views.ZendeskError("Zendesk API error 422: bad field value", status=422)
         if self.delay:
             time.sleep(self.delay)
         attachments = []
@@ -118,13 +127,17 @@ class FakeZendesk:
                                 "content_type": ctype, "size": len(data),
                                 "content_url": f"https://example.zendesk.com/attachments/{name}", "thumbnails": []})
         self.comments.setdefault(ticket_id, []).append(
-            {"author_id": 7, "public": public, "created_at": "2026-11-23T20:00:00Z", "attachments": attachments}
+            {"author_id": author_id or 7, "public": public, "created_at": "2026-11-23T20:00:00Z",
+             "body": body, "html_body": html_body, "attachments": attachments}
         )
+        self.tags.extend(t for t in tags or [] if t not in self.tags)
         self.updates.append(
             {
                 "uploads": list(uploads or []),
                 "ticket_id": ticket_id,
                 "body": body,
+                "html_body": html_body,
+                "author_id": author_id,
                 "public": public,
                 "tags": list(tags or []),
                 "custom_fields": dict(custom_fields or {}),
@@ -165,7 +178,8 @@ def migrated():
 def clean_db(migrated):
     with psycopg.connect(TEST_DSN, autocommit=True) as conn:
         conn.execute(
-            "TRUNCATE repair.event, repair.rma, repair.tech, repair.setting, portal.action_log RESTART IDENTITY CASCADE"
+            "TRUNCATE repair.event, repair.intake, repair.rma, repair.tech, repair.setting, portal.action_log "
+            "RESTART IDENTITY CASCADE"
         )
     yield
 
@@ -1692,3 +1706,1077 @@ def test_demo_sample_history(client, zd, tech):
     assert not atf_log.needs_review()
     for path in ("/report/", "/queue", "/final-reports", "/t/6001", "/t/6001/report", "/ad/"):
         assert client.get(path).status_code == 200, path
+
+
+# ---------------------------------------------------------------- repair intake
+
+import hashlib  # noqa: E402
+import re  # noqa: E402
+from datetime import datetime, timezone  # noqa: E402
+
+import intake  # noqa: E402
+import intake_views  # noqa: E402
+from flask.testing import FlaskClient  # noqa: E402
+
+ANSWERS = {
+    "model": "Ridgeline FFT", "serial": "CA12345", "caliber": "6.5 PRC",
+    "issue": "Groups opened up to 3 MOA.\nStarted after a fall.",
+    "check_specific": "Please check the crown",
+    "concerns": ["Accuracy", "Stock or chassis"],
+}
+
+
+@pytest.fixture
+def intake_on(monkeypatch):
+    """Intake form switched on, with a public address and a go-live date before the fake tickets."""
+    monkeypatch.setenv("REPAIR_INTAKE_ENABLED", "1")
+    monkeypatch.setenv("REPAIR_INTAKE_BASE_URL", "https://repairs.example.com")
+    monkeypatch.setenv("REPAIR_INTAKE_GO_LIVE_AT", "2026-10-01T00:00:00Z")
+    for name in ("REPAIR_INTAKE_REMINDER_HOURS", "ZENDESK_INTAKE_SERIAL_FIELD_ID",
+                 "ZENDESK_INTAKE_MODEL_FIELD_ID", "ZENDESK_INTAKE_CALIBER_FIELD_ID"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(intake_views, "_hits", {})  # the rate limiter starts empty
+
+
+class _Browser(FlaskClient):
+    """A second browser for tests that already hold the signed-in ``client``.
+
+    ``client`` is entered as a context manager, so it keeps its last request's
+    app context alive, and a request from another client would reuse it and
+    with it ``g`` (where auth caches the signed-in tech). Each request here
+    gets its own app context, as it does in production.
+    """
+
+    def open(self, *args, **kwargs):
+        with flask_app.app_context():
+            return super().open(*args, **kwargs)
+
+
+def _browser():
+    return _Browser(flask_app, flask_app.response_class, use_cookies=True)
+
+
+@pytest.fixture
+def public():
+    """A customer's browser: no tech signed in."""
+    return _browser()
+
+
+def _link_token(zd):
+    """The token in the most recent link the fake Zendesk was asked to email."""
+    for update in reversed(zd.updates):
+        found = re.search(r"/repair/intake/([A-Za-z0-9_-]{43})(?![A-Za-z0-9_-])", update["body"] or "")
+        if found:
+            return found.group(1)
+    raise AssertionError("no intake link was posted")
+
+
+def _sql(query, params=()):
+    with psycopg.connect(TEST_DSN, autocommit=True) as conn:
+        return conn.execute(query, params).fetchall() if query.lstrip().upper().startswith("SELECT") \
+            else conn.execute(query, params)
+
+
+def _linked(client, zd, ticket_id=500):
+    """Add a ticket with the form on; returns the customer's URL path."""
+    _add(client, ticket_id)
+    return f"/repair/intake/{_link_token(zd)}"
+
+
+def _submit(public, url, **overrides):
+    data = {**ANSWERS, **overrides}
+    return public.post(url, data=data, content_type="multipart/form-data")
+
+
+def _failed_submit(client, zd, public, status=502):
+    """A submitted intake whose first write-back Zendesk refused. Returns the row."""
+    url = _linked(client, zd)
+    zd.fail, zd.fail_status = True, status
+    assert _submit(public, url, photos=[_file("a.jpg", _img())]).status_code == 303
+    zd.fail = False
+    row = intake.for_ticket(500)
+    assert row["status"] == "sync_failed"
+    return row
+
+
+@needs_db
+def test_intake_off_by_default(client, zd, tech, monkeypatch):
+    monkeypatch.delenv("REPAIR_INTAKE_ENABLED", raising=False)
+    _add(client)
+    assert zd.updates == []
+    assert zd.tag_calls == [(500, ["repair-portal", "rp-queued"])]
+    assert intake.for_ticket(500) is None
+    page = client.get("/t/500").get_data(as_text=True)
+    assert "Customer intake form" not in page
+    assert "form sent" not in client.get("/queue").get_data(as_text=True)
+
+
+@needs_db
+def test_add_posts_intake_link(client, zd, tech, intake_on):
+    assert b"The customer is emailed a link to the intake form." in client.get("/t/500").data
+    resp = client.post("/t/500/add", follow_redirects=True)
+    assert b"The customer was emailed the intake form link." in resp.data
+    assert len(zd.updates) == 1
+    u = zd.updates[0]
+    assert u["public"] is True and u["tags"] == ["repair-portal", "repair_intake_sent"]
+    assert u["html_body"] is None and u["author_id"] is None and u["uploads"] == []
+    token = _link_token(zd)
+    assert f"https://repairs.example.com/repair/intake/{token}\n" in u["body"]
+    assert u["body"].startswith("Hi Jane,") and "preparing to receive your firearm" in u["body"]
+    assert "works for 30 days" in u["body"] and "{" not in u["body"]
+    assert zd.tag_calls == [(500, ["repair-portal", "rp-queued"])]  # the queue tag call is unchanged
+
+    row = intake.for_ticket(500)
+    assert row["status"] == "link_sent" and row["link_send_count"] == 1 and row["link_sent_at"] is not None
+    assert row["token_hash"] == hashlib.sha256(token.encode()).hexdigest()
+    assert token not in str(row)  # only the hash is kept
+    assert row["created_by"] == "Kyler" and row["last_error"] is None and row["next_attempt_at"] is None
+    days = (row["expires_at"] - datetime.now(timezone.utc)).total_seconds() / 86400
+    assert 29.9 < days < 30.1
+    ev = repair_db.events_for(500)[0]
+    assert ev["kind"] == "intake" and ev["label"] == "Intake form link sent" and ev["tech_name"] == "Kyler"
+    assert repair_db.get_rma(500)["intake_status"] == "link_sent"
+
+
+@needs_db
+@pytest.mark.parametrize("case, warned", [
+    ("go_live_later", False), ("go_live_garbage", True), ("solved", False), ("tagged", False),
+    ("no_base_url", True),
+])
+def test_link_guards(client, zd, tech, intake_on, monkeypatch, case, warned):
+    if case == "go_live_later":
+        monkeypatch.setenv("REPAIR_INTAKE_GO_LIVE_AT", "2026-11-15")  # the ticket is from Nov 1
+    elif case == "go_live_garbage":
+        monkeypatch.setenv("REPAIR_INTAKE_GO_LIVE_AT", "next tuesday")
+    elif case == "solved":
+        zd.status = "solved"
+    elif case == "tagged":
+        zd.tags = ["repair_intake_sent"]
+    else:
+        monkeypatch.delenv("REPAIR_INTAKE_BASE_URL")
+        monkeypatch.delenv("PORTAL_BASE_URL", raising=False)
+    resp = client.post("/t/500/add", follow_redirects=True)
+    assert repair_db.get_rma(500) is not None  # the add itself always goes through
+    assert zd.updates == [] and intake.for_ticket(500) is None
+    assert b"emailed the intake form link" not in resp.data
+    assert (b"The intake form link was not sent to the customer" in resp.data) is warned
+    assert b"Customer intake form" in resp.data and b"No link has been sent for this ticket." in resp.data
+
+
+@needs_db
+def test_go_live_unset_sends(client, zd, tech, intake_on, monkeypatch):
+    monkeypatch.delenv("REPAIR_INTAKE_GO_LIVE_AT")
+    zd.created_at = "2019-03-01T00:00:00Z"  # no cutoff: the ticket's age does not matter
+    _add(client)
+    assert len(zd.updates) == 1 and intake.for_ticket(500)["status"] == "link_sent"
+
+
+@needs_db
+def test_portal_base_url_is_never_used_for_the_link(client, zd, tech, intake_on, monkeypatch):
+    """PORTAL_BASE_URL is the shop-network address: a customer could not open a link built from it."""
+    monkeypatch.delenv("REPAIR_INTAKE_BASE_URL")
+    monkeypatch.setenv("PORTAL_BASE_URL", "https://portal.example.com/")
+    resp = _add(client)
+    assert zd.updates == [] and intake.for_ticket(500) is None
+    assert repair_db.get_rma(500) is not None  # the ticket is still queued
+
+
+@needs_db
+def test_link_sent_once(client, zd, tech, intake_on):
+    _add(client)
+    resp = client.post("/t/500/add", follow_redirects=True)
+    assert b"already in the repair queue" in resp.data
+    assert len(zd.updates) == 1
+    ticket, requester, _org = zd.get_ticket(500)
+    assert intake.send_link(zd, ticket, requester, tech) == "already_tagged"
+    # Even with the tag gone (two techs adding at once never see it), the row is the fence.
+    zd.tags.clear()
+    ticket, requester, _org = zd.get_ticket(500)
+    assert intake.send_link(zd, ticket, requester, tech) == "exists"
+    assert len(zd.updates) == 1 and intake.for_ticket(500)["link_send_count"] == 1
+
+
+@needs_db
+def test_link_failure_keeps_rma(client, zd, tech, intake_on):
+    zd.fail, zd.fail_status = True, 503
+    resp = client.post("/t/500/add", follow_redirects=True)
+    assert b"Added ticket #500 to the repair queue" in resp.data
+    assert b"The intake form link was not sent to the customer" in resp.data
+    assert repair_db.get_rma(500)["stage"] == "queued" and zd.updates == []
+    row = intake.for_ticket(500)
+    assert row["status"] == "pending_link" and "503" in row["last_error"]
+    assert row["attempts"] == 1 and row["next_attempt_at"] is not None and row["link_send_count"] == 0
+    assert b"Customer intake forms that need a look" in client.get("/queue").data
+    assert b"<strong>not</strong> reached the customer" in client.get("/t/500").data
+
+    zd.fail = False
+    resp = client.post("/t/500/intake/send", follow_redirects=True)
+    assert b"Sent the customer a link to the intake form" in resp.data
+    assert len(zd.updates) == 1
+    # Nothing reached the customer before, so this is the first-link wording.
+    assert "preparing to receive your firearm" in zd.updates[0]["body"]
+    assert "no longer works" not in zd.updates[0]["body"]
+    row = intake.for_ticket(500)
+    assert row["status"] == "link_sent" and row["last_error"] is None and row["next_attempt_at"] is None
+    assert row["token_hash"] == intake.hash_token(_link_token(zd))
+    assert b"Customer intake forms that need a look" not in client.get("/queue").data
+
+
+@needs_db
+def test_link_permanent_failure_is_not_retried(client, zd, tech, intake_on):
+    zd.fail, zd.fail_status = True, 403
+    _add(client)
+    row = intake.for_ticket(500)
+    assert row["status"] == "pending_link" and row["next_attempt_at"] is None
+    zd.fail = False
+    assert intake.sweep(zd) == {} and zd.updates == []
+
+
+@needs_db
+def test_link_retried_by_sweep(client, zd, tech, intake_on):
+    zd.fail, zd.fail_status = True, 503
+    _add(client)
+    first_hash = intake.for_ticket(500)["token_hash"]
+    zd.fail = False
+    assert intake.sweep(zd) == {} and zd.updates == []  # backoff not up yet
+    _sql("UPDATE repair.intake SET next_attempt_at = now() - interval '1 minute'")
+    assert intake.sweep(zd) == {"links": 1}
+    assert len(zd.updates) == 1 and zd.updates[0]["tags"] == ["repair-portal", "repair_intake_sent"]
+    row = intake.for_ticket(500)
+    assert row["status"] == "link_sent" and row["token_hash"] == intake.hash_token(_link_token(zd))
+    assert row["token_hash"] != first_hash  # the first token was never emailed and is unknown now
+    assert intake.sweep(zd) == {} and len(zd.updates) == 1
+
+
+@needs_db
+def test_link_lost_response_recovered(client, zd, tech, intake_on):
+    zd.fail, zd.fail_status = True, 503
+    _add(client)
+    before = intake.for_ticket(500)
+    assert before["status"] == "pending_link"
+    # The PUT did land (the tag is on the ticket); only its answer was lost.
+    zd.fail = False
+    zd.tags = ["repair-portal", "repair_intake_sent"]
+    _sql("UPDATE repair.intake SET next_attempt_at = now() - interval '1 minute'")
+    assert intake.sweep(zd) == {"links": 1}
+    row = intake.for_ticket(500)
+    assert row["status"] == "link_sent" and row["link_sent_at"] is not None
+    assert zd.updates == []  # no second email
+    assert row["token_hash"] == before["token_hash"]  # the emailed link still works
+
+
+@needs_db
+def test_resend_rotates_token(client, zd, tech, intake_on, public):
+    old = _linked(client, zd)
+    assert public.get(old).status_code == 200
+
+    # A send needs a signed-in tech.
+    resp = public.post("/t/500/intake/send")
+    assert resp.status_code == 302 and len(zd.updates) == 1
+
+    resp = client.post("/t/500/intake/send", follow_redirects=True)
+    assert b"Sent the customer a link to the intake form" in resp.data
+    assert len(zd.updates) == 2
+    u = zd.updates[1]
+    assert u["public"] is True and "no longer works" in u["body"]
+    new = f"/repair/intake/{_link_token(zd)}"
+    assert new != old
+    row = intake.for_ticket(500)
+    assert row["token_hash"] == intake.hash_token(new.rsplit("/", 1)[1])
+    assert row["status"] == "link_sent" and row["link_send_count"] == 2
+    assert repair_db.events_for(500)[0]["label"] == "New intake form link sent"
+
+    gone = public.get(old)
+    assert gone.status_code == 404 and b"This link is no longer active" in gone.data
+    assert public.get(new).status_code == 200
+
+    # Once the customer has answered there is nothing to resend.
+    assert _submit(public, new).status_code == 303
+    sent = len(zd.updates)
+    resp = client.post("/t/500/intake/send", follow_redirects=True)
+    assert b"already sent the form" in resp.data
+    assert len(zd.updates) == sent and intake.for_ticket(500)["token_hash"] == row["token_hash"]
+
+
+@needs_db
+def test_failed_resend_is_reported_and_can_be_repeated(client, zd, tech, intake_on, public):
+    old = _linked(client, zd)
+    zd.fail, zd.fail_status = True, 503
+    resp = client.post("/t/500/intake/send", follow_redirects=True)
+    assert b"so the link was not sent" in resp.data and b"503" in resp.data
+    row = intake.for_ticket(500)
+    assert row["status"] == "pending_link" and row["link_send_count"] == 1 and len(zd.updates) == 1
+    # A staff send is never retried behind their back: the sweep can't tell whether it landed.
+    assert row["next_attempt_at"] is None
+    assert intake.sweep(zd, force=True) == {} and len(zd.updates) == 1
+    assert b"link not sent" in client.get("/queue").data
+    zd.fail = False
+    client.post("/t/500/intake/send")
+    assert len(zd.updates) == 2 and "no longer works" in zd.updates[1]["body"]
+    assert intake.for_ticket(500)["status"] == "link_sent"
+    assert public.get(old).status_code == 404
+    assert public.get(f"/repair/intake/{_link_token(zd)}").status_code == 200
+
+
+@needs_db
+def test_resend_refused_for_solved_ticket_and_unqueued_ticket(client, zd, tech, intake_on):
+    resp = client.post("/t/777/intake/send", follow_redirects=True)  # never added
+    assert b"in the repair queue. Add it first." in resp.data
+    assert zd.updates == [] and intake.for_ticket(777) is None
+    _add(client)
+    zd.status = "solved"
+    resp = client.post("/t/500/intake/send", follow_redirects=True)
+    assert b"solved or closed in Zendesk" in resp.data
+    assert len(zd.updates) == 1
+
+
+@needs_db
+def test_staff_send_creates_the_intake_for_older_tickets(client, zd, tech, monkeypatch):
+    _add(client)  # added while the form was off
+    assert intake.for_ticket(500) is None
+    monkeypatch.setenv("REPAIR_INTAKE_ENABLED", "1")
+    monkeypatch.setenv("REPAIR_INTAKE_BASE_URL", "https://repairs.example.com")
+    monkeypatch.setenv("REPAIR_INTAKE_GO_LIVE_AT", "2027-01-01")  # the button ignores the cutoff
+    assert b"No link has been sent for this ticket." in client.get("/t/500").data
+    client.post("/t/500/intake/send")
+    assert len(zd.updates) == 1 and "preparing to receive your firearm" in zd.updates[0]["body"]
+    assert intake.for_ticket(500)["status"] == "link_sent"
+
+
+@needs_db
+def test_public_form_get(client, zd, tech, intake_on, public):
+    zd.custom_fields = ZD_RIFLE
+    url = _linked(client, zd)
+    resp = public.get(url)
+    page = resp.get_data(as_text=True)
+    assert resp.status_code == 200
+    assert "Tell us about your rifle" in page
+    assert "preparing to receive your firearm" in page
+    assert 'value="CA-12345"' in page and 'value="Ridgeline FFT"' in page and 'value="6.5 Creedmoor"' in page
+    assert "Jane Hunter" not in page and "jane@example.com" not in page  # no contact details on the form
+    assert 'enctype="multipart/form-data"' in page and 'name="photos"' in page
+    # A customer page: no staff navigation, names or links into the portal.
+    for staff_only in ("Kyler", "Sign out", "/queue", "/scan", "/tech", "/admin", "#500", "Incoming"):
+        assert staff_only not in page, staff_only
+    assert resp.headers["Cache-Control"] == "no-store"
+    assert resp.headers["Referrer-Policy"] == "no-referrer"
+    assert resp.headers["X-Robots-Tag"] == "noindex"
+    assert "Set-Cookie" not in resp.headers  # the link is the key: no session, no cookie
+
+    malformed = public.get("/repair/intake/not-a-token")
+    unknown = public.get("/repair/intake/" + "A" * 43)
+    _sql("UPDATE repair.intake SET expires_at = now() - interval '1 minute'")
+    expired = public.get(url)
+    assert (malformed.status_code, unknown.status_code, expired.status_code) == (404, 404, 410)
+    for dead in (malformed, unknown, expired):
+        text = dead.get_data(as_text=True)
+        assert "This link is no longer active" in text and "reply to the email" in text
+        assert "#500" not in text and 'name="serial"' not in text
+        assert dead.headers["Cache-Control"] == "no-store"
+    assert malformed.data == unknown.data == expired.data  # a guesser learns nothing from the page
+
+
+@needs_db
+def test_public_pages_when_database_is_down(client, zd, tech, intake_on, public, monkeypatch):
+    url = _linked(client, zd)
+    monkeypatch.setattr(db, "available", lambda: False)
+    for resp in (public.get(url), _submit(public, url)):
+        assert resp.status_code == 503 and b"We can&#39;t open the form right now" in resp.data
+    monkeypatch.undo()
+    assert intake.for_ticket(500)["status"] == "link_sent"
+
+
+@needs_db
+def test_submit_validation(client, zd, tech, intake_on, public):
+    url = _linked(client, zd)
+    resp = public.post(url, data={"model": "Ridgeline <FFT>", "issue": "  ", "ammo": "Hornady ELD-X",
+                                  "concerns": ["Feeding", "Not on the list"],
+                                  "optic": "Leupold VX-5"}, content_type="multipart/form-data")
+    page = resp.get_data(as_text=True)
+    assert resp.status_code == 422
+    assert "Almost there." in page
+    assert 'value="Ridgeline &lt;FFT&gt;"' in page and 'value="Hornady ELD-X"' in page and 'value="Leupold VX-5"' in page
+    assert "Please fill in: Serial number" in page and "Please fill in: What&#39;s going on" in page
+    assert "Please fill in: Model" not in page and "Please fill in: Ammunition" not in page
+    assert 'value="Feeding" checked' in page and page.count(" checked") == 1  # ticks survive the re-render
+    row = intake.for_ticket(500)
+    assert row["status"] == "link_sent" and row["answers"] == {} and row["submitted_at"] is None
+    assert len(zd.updates) == 1  # only the link
+
+
+@needs_db
+def test_submit_syncs(client, zd, tech, intake_on, public):
+    url = _linked(client, zd)
+    resp = _submit(public, url, photos=[_file("a.jpg", _img()), _file("b.heic", _img("HEIF"))])
+    assert resp.status_code == 303 and resp.headers["Location"].endswith(url)
+    done = public.get(url)
+    assert done.status_code == 200 and b"Thanks, we have it." in done.data
+
+    row = intake.for_ticket(500)
+    assert row["status"] == "synced" and row["synced_at"] is not None and row["submitted_at"] is not None
+    assert row["claimed_until"] is None and row["last_error"] is None and row["next_attempt_at"] is None
+    assert {k: row["answers"][k] for k in ANSWERS} == ANSWERS
+    assert row["answers"]["optic"] == ""
+
+    assert len(zd.updates) == 2
+    u = zd.updates[1]
+    assert u["body"] is None and u["public"] is True and u["author_id"] == 1
+    assert u["tags"] == ["repair-portal", "repair_intake_received"]
+    assert u["custom_fields"] == {}  # no ZENDESK_INTAKE_*_FIELD_ID set
+    html = u["html_body"]
+    assert "<strong>Model:</strong> Ridgeline FFT" in html and "<strong>Serial number:</strong> CA12345" in html
+    assert "Groups opened up to 3 MOA.<br>Started after a fall." in html
+    assert "Accuracy, Stock or chassis" in html and "Please check the crown" in html
+    assert f"Intake form reference RI-{row['id']}" in html and f"<!-- intake:{row['id']} -->" in html
+    assert "Optic" not in html  # blank answers are left out
+    sent = [zd.uploaded[t] for t in u["uploads"]]
+    assert [(name, ctype) for name, _data, ctype in sent] == [("photo-1.jpg", "image/jpeg"),
+                                                             ("photo-2.jpg", "image/jpeg")]
+    assert sent[0][1] == _img() and sent[1][1][:3] == b"\xff\xd8\xff"  # the HEIC went as a JPEG
+
+    assert _sql("SELECT count(*) AS n FROM repair.intake_file")[0][0] == 0
+    ev = repair_db.events_for(500)[0]
+    assert (ev["kind"], ev["label"], ev["tech_name"]) == ("intake", "Customer intake form received", "Customer")
+    assert repair_db.get_rma(500)["intake_status"] == "synced"
+    # The customer's answers do not overwrite what the tech verifies at Received.
+    assert repair_db.get_rma(500)["serial_number"] is None
+
+
+@needs_db
+def test_submit_escapes_html(client, zd, tech, intake_on, public):
+    url = _linked(client, zd)
+    nasty = "<script>alert(1)</script>"
+    assert _submit(public, url, issue=nasty, model='<img src=x onerror="x">', ammo="A & B").status_code == 303
+    html = zd.updates[-1]["html_body"]
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html and "<script" not in html
+    assert "<img" not in html and "&lt;img src=x onerror=&#34;x&#34;&gt;" in html
+    assert "A &amp; B" in html
+    for page in (public.get(url).get_data(as_text=True), client.get("/t/500").get_data(as_text=True)):
+        assert nasty not in page and "<img src=x" not in page
+        assert "&lt;script&gt;alert(1)&lt;/script&gt;" in page
+
+
+def _storage(name, data):
+    import io
+
+    from werkzeug.datastructures import FileStorage
+
+    return FileStorage(stream=io.BytesIO(data), filename=name)
+
+
+def test_photo_rules(monkeypatch):
+    jpg, png, webp, pdf = _img(), _img("PNG"), _img("WEBP"), b"%PDF-1.4 test"
+    assert [intake.sniff(d) for d in (jpg, png, webp, pdf, _img("HEIF"), b"MZ\x90\x00", b"PK\x03\x04xx", b"")] == \
+        ["jpg", "png", "webp", "pdf", "heic", None, None, None]
+
+    uploads, err = intake.read_photos([_storage(f"p{i}.jpg", jpg) for i in range(6)])
+    assert err is None and len(uploads) == 6
+    uploads, err = intake.read_photos([_storage(f"p{i}.jpg", jpg) for i in range(7)])
+    assert uploads == [] and "at most 6" in err
+
+    uploads, err = intake.read_photos([_storage("a.jpg", b"MZ\x90\x00 not a photo")])
+    assert uploads == [] and "a.jpg" in err and "isn't a file we can take" in err
+    uploads, err = intake.read_photos([_storage("sheet.xlsx", b"PK\x03\x04xx")])
+    assert uploads == [] and "sheet.xlsx" in err
+
+    # The type comes from the bytes and the name is ours, whatever the customer's file was called.
+    uploads, err = intake.read_photos([
+        _storage("target.webp", webp), _storage("receipt.pdf", pdf), _storage("x.pdf", png),
+        _storage("../../etc/passwd.JPG", jpg), _storage("empty.jpg", b""), _storage("", b""),
+    ])
+    assert err is None
+    assert [(u.filename, u.content_type) for u in uploads] == [
+        ("photo-1.webp", "image/webp"), ("photo-2.pdf", "application/pdf"), ("photo-3.png", "image/png"),
+        ("photo-4.jpg", "image/jpeg"),
+    ]
+    assert uploads[2].data == png
+
+    monkeypatch.setattr(intake, "MAX_PHOTO_BYTES", len(jpg) - 1)
+    uploads, err = intake.read_photos([_storage("big.jpg", jpg)])
+    assert uploads == [] and "big.jpg" in err and "is over" in err
+    monkeypatch.setattr(intake, "MAX_PHOTO_BYTES", len(jpg))
+    uploads, err = intake.read_photos([_storage("fits.jpg", jpg)])
+    assert err is None and len(uploads) == 1
+
+
+@needs_db
+def test_bad_photo_keeps_the_answers_and_saves_nothing(client, zd, tech, intake_on, public):
+    url = _linked(client, zd)
+    resp = _submit(public, url, photos=[_file("ok.jpg", _img()), _file("run.jpg", b"MZ\x90\x00")])
+    page = resp.get_data(as_text=True)
+    assert resp.status_code == 422 and "isn&#39;t a file we can take" in page
+    assert 'value="CA12345"' in page and "Started after a fall." in page
+    assert intake.for_ticket(500)["status"] == "link_sent" and len(zd.updates) == 1
+    assert _sql("SELECT count(*) AS n FROM repair.intake_file")[0][0] == 0
+    resp = _submit(public, url, photos=[_file(f"p{i}.jpg", _img()) for i in range(7)])
+    assert resp.status_code == 422 and b"at most 6" in resp.data
+    assert intake.for_ticket(500)["status"] == "link_sent"
+
+
+@needs_db
+def test_custom_fields(client, zd, tech, intake_on, public, monkeypatch):
+    assert intake.field_values(ANSWERS) == {}
+    monkeypatch.setenv("ZENDESK_INTAKE_SERIAL_FIELD_ID", "301")
+    monkeypatch.setenv("ZENDESK_INTAKE_MODEL_FIELD_ID", "302")
+    monkeypatch.setenv("ZENDESK_INTAKE_CALIBER_FIELD_ID", "not-a-number")
+    assert intake.field_values(ANSWERS) == {301: "CA12345", 302: "Ridgeline FFT"}
+    monkeypatch.setenv("ZENDESK_INTAKE_CALIBER_FIELD_ID", "303")
+    url = _linked(client, zd)
+    assert _submit(public, url).status_code == 303
+    assert zd.updates[-1]["custom_fields"] == {301: "CA12345", 302: "Ridgeline FFT", 303: "6.5 PRC"}
+    row = intake.for_ticket(500)
+    assert row["status"] == "synced" and row["last_error"] is None
+
+
+@needs_db
+def test_custom_fields_refused_posts_without_them(client, zd, tech, intake_on, public, monkeypatch):
+    monkeypatch.setenv("ZENDESK_INTAKE_MODEL_FIELD_ID", "302")  # a drop-down that won't take free text
+    zd.fail_fields = True
+    url = _linked(client, zd)
+    assert _submit(public, url, photos=[_file("a.jpg", _img())]).status_code == 303
+    assert len(zd.updates) == 2
+    u = zd.updates[-1]
+    assert u["custom_fields"] == {} and "Ridgeline FFT" in u["html_body"] and len(u["uploads"]) == 1
+    row = intake.for_ticket(500)
+    assert row["status"] == "synced"
+    assert row["last_error"].startswith("Posted without the Zendesk ticket fields")
+    assert b"Posted without the Zendesk ticket fields" in client.get("/t/500").data
+    assert b"Customer intake forms that need a look" not in client.get("/queue").data
+
+
+@needs_db
+def test_submitted_is_read_only(client, zd, tech, intake_on, public):
+    url = _linked(client, zd)
+    assert _submit(public, url).status_code == 303
+    resp = public.get(url)
+    page = resp.get_data(as_text=True)
+    assert resp.status_code == 200 and "Thanks, we have it." in page
+    assert "Ridgeline FFT" in page and "CA12345" in page and "Please check the crown" in page
+    assert "Accuracy, Stock or chassis" in page
+    assert "<form" not in page and 'name="serial"' not in page
+    assert resp.headers["Cache-Control"] == "no-store"
+
+    sent = len(zd.updates)
+    again = _submit(public, url, serial="CHANGED", optic="Other Scope")
+    assert again.status_code in (200, 303)
+    if again.status_code == 200:
+        assert b"Thanks, we have it." in again.data and b"Other Scope" not in again.data
+    assert len(zd.updates) == sent
+    row = intake.for_ticket(500)
+    assert row["answers"]["serial"] == "CA12345" and row["status"] == "synced"
+    assert intake.save_submission(row["id"], {**ANSWERS, "serial": "CHANGED"}, []) is False
+
+
+@needs_db
+@pytest.mark.parametrize("how", ["sweep", "button"])
+def test_sync_failure_then_retry(client, zd, tech, intake_on, public, how):
+    url = _linked(client, zd)
+    zd.fail, zd.fail_status = True, 502
+    resp = _submit(public, url, photos=[_file("a.jpg", _img())])
+    assert resp.status_code == 303  # the customer never sees the Zendesk problem
+    assert b"Thanks, we have it." in public.get(url).data
+    row = intake.for_ticket(500)
+    assert row["status"] == "sync_failed" and row["attempts"] == 1 and "502" in row["last_error"]
+    assert row["next_attempt_at"] is not None and row["claimed_until"] is None
+    assert row["file_count"] == 1 and row["answers"]["serial"] == "CA12345"
+    assert len(zd.updates) == 1
+    assert b"form sync failed" in client.get("/queue").data
+    page = client.get("/t/500").data
+    assert b"<strong>not</strong> on the Zendesk ticket yet" in page and b"Retry Zendesk" in page
+    assert b"Please check the crown" in page  # the answers are safe here meanwhile
+
+    zd.fail = False
+    assert intake.sweep(zd) == {}  # not due yet
+    assert len(zd.updates) == 1
+    if how == "sweep":
+        assert intake.sweep(zd, force=True) == {"synced": 1}
+    else:
+        resp = client.post("/t/500/intake/retry", follow_redirects=True)
+        assert b"intake form is on the Zendesk ticket now" in resp.data
+    assert len(zd.updates) == 2
+    u = zd.updates[1]
+    assert zd.uploaded[u["uploads"][0]][0] == "photo-1.jpg" and len(u["uploads"]) == 1
+    assert u["author_id"] == 1 and "CA12345" in u["html_body"]
+    row = intake.for_ticket(500)
+    assert row["status"] == "synced" and row["file_count"] == 0 and row["last_error"] is None
+    assert intake.sweep(zd, force=True) == {} and len(zd.updates) == 2
+
+
+@needs_db
+def test_sync_retry_due_without_force(client, zd, tech, intake_on, public):
+    row = _failed_submit(client, zd, public)
+    _sql("UPDATE repair.intake SET next_attempt_at = now() - interval '1 minute'")
+    assert intake.sweep(zd) == {"synced": 1}
+    assert intake.for_ticket(500)["status"] == "synced" and row["id"] == intake.for_ticket(500)["id"]
+
+
+@needs_db
+def test_sync_gives_up_after_max_attempts(client, zd, tech, intake_on, public):
+    _failed_submit(client, zd, public)
+    _sql("UPDATE repair.intake SET attempts = %s", (intake.MAX_ATTEMPTS - 1,))
+    zd.fail = True
+    assert intake.sweep(zd, force=True) == {"failed": 1}
+    row = intake.for_ticket(500)
+    assert row["status"] == "sync_failed" and row["next_attempt_at"] is None
+    assert row["attempts"] == intake.MAX_ATTEMPTS and row["file_count"] == 1
+
+
+@needs_db
+@pytest.mark.parametrize("seen, expected", [("comment", "already"), ("marker", "already"), ("tag", "already"),
+                                            ("other_intake", "synced")])
+def test_sync_idempotent(client, zd, tech, intake_on, public, seen, expected):
+    row = _failed_submit(client, zd, public)
+    _sql("UPDATE repair.intake SET status = 'submitted'")
+    if seen == "comment":  # the PUT landed, our own update did not
+        zd.comments[500].append({"body": None, "html_body": f"<p>Intake form reference RI-{row['id']}</p>"})
+    elif seen == "marker":
+        zd.comments[500].append({"body": f"x <!-- intake:{row['id']} -->", "html_body": None})
+    elif seen == "tag":
+        zd.tags.append("repair_intake_received")
+    else:  # RI-1 must not be mistaken for RI-12
+        zd.comments[500].append({"body": f"Intake form reference RI-{row['id']}2", "html_body": None})
+    sent = len(zd.updates)
+    assert intake.sync(zd, row["id"]) == expected
+    assert len(zd.updates) == sent + (1 if expected == "synced" else 0)
+    after = intake.for_ticket(500)
+    assert after["status"] == "synced" and after["file_count"] == 0 and after["claimed_until"] is None
+    assert repair_db.events_for(500)[0]["label"] == "Customer intake form received"
+    assert intake.sync(zd, row["id"]) == "already"  # a synced row is left alone
+    assert len(zd.updates) == sent + (1 if expected == "synced" else 0)
+
+
+@needs_db
+def test_sync_claim(client, zd, tech, intake_on, public):
+    row = _failed_submit(client, zd, public)
+    sent = len(zd.updates)
+    _sql("UPDATE repair.intake SET claimed_until = now() + interval '5 minutes'")
+    assert intake.sync(zd, row["id"]) == "busy"
+    assert intake.sync(zd, row["id"], force=True) == "busy"  # force never steals a live lease
+    assert intake.sweep(zd, force=True) == {}
+    resp = client.post("/t/500/intake/retry", follow_redirects=True)
+    assert b"Another attempt is running right now" in resp.data
+    assert len(zd.updates) == sent and intake.for_ticket(500)["status"] == "sync_failed"
+    assert intake.for_ticket(500)["attempts"] == row["attempts"]
+
+    # A worker that died mid-upload leaves a lease that runs out.
+    _sql("UPDATE repair.intake SET status = 'submitted', claimed_until = now() - interval '1 minute'")
+    assert intake.sweep(zd) == {"synced": 1}
+    assert len(zd.updates) == sent + 1 and intake.for_ticket(500)["status"] == "synced"
+    assert intake.sync(zd, 987654) == "busy"  # no such intake
+
+
+@needs_db
+def test_sync_closed_ticket(client, zd, tech, intake_on, public):
+    url = _linked(client, zd)
+    zd.status = "closed"
+    assert _submit(public, url, photos=[_file("a.jpg", _img())]).status_code == 303
+    assert b"Thanks, we have it." in public.get(url).data
+    row = intake.for_ticket(500)
+    assert row["status"] == "sync_failed" and row["next_attempt_at"] is None
+    assert "closed" in row["last_error"] and row["file_count"] == 1
+    assert len(zd.updates) == 1 and zd.uploaded == {}  # nothing uploaded to a ticket that can't take it
+    assert intake.sweep(zd) == {}  # no automatic retry
+    page = client.get("/queue").get_data(as_text=True)
+    assert "Customer intake forms that need a look" in page and "/t/500" in page and "Retry all" in page
+    assert "form sync failed" in page
+    assert b"The portal has stopped trying" in client.get("/t/500").data
+
+    # Staff reopen the ticket (a follow-up in real life) and press Retry all.
+    zd.status = "open"
+    resp = client.post("/intake/retry-failed", follow_redirects=True)
+    assert b"1 written to Zendesk" in resp.data
+    assert intake.for_ticket(500)["status"] == "synced"
+    assert b"Customer intake forms that need a look" not in client.get("/queue").data
+
+
+@needs_db
+def test_retry_buttons_need_a_tech(client, zd, tech, intake_on, public):
+    _failed_submit(client, zd, public)
+    sent = len(zd.updates)
+    assert public.post("/t/500/intake/retry").status_code == 302
+    assert public.post("/intake/retry-failed").status_code == 302
+    assert len(zd.updates) == sent and intake.for_ticket(500)["status"] == "sync_failed"
+
+
+@needs_db
+def test_sweep_expires(client, zd, tech, intake_on, public):
+    url = _linked(client, zd)
+    zd.tags.clear()  # the fake keeps one tag list for every ticket
+    _add(client, 501)  # a second, still-valid link is left alone
+    _sql("UPDATE repair.intake SET expires_at = now() - interval '1 hour' WHERE ticket_id = 500")
+    assert intake.sweep(zd) == {"expired": 1}
+    assert intake.for_ticket(500)["status"] == "expired" and intake.for_ticket(501)["status"] == "link_sent"
+    resp = public.get(url)
+    assert resp.status_code == 410 and b"This link is no longer active" in resp.data
+    assert _submit(public, url).status_code == 410
+    assert intake.for_ticket(500)["answers"] == {} and len(zd.updates) == 2
+    page = client.get("/t/500").data
+    assert b"before the customer answered" in page and b"Send a new link" in page
+
+    # Staff can send a new one.
+    client.post("/t/500/intake/send")
+    assert intake.for_ticket(500)["status"] == "link_sent"
+    assert public.get(f"/repair/intake/{_link_token(zd)}").status_code == 200
+    assert public.get(url).status_code == 404
+
+
+@needs_db
+def test_reminder(client, zd, tech, intake_on, monkeypatch):
+    _add(client)
+    _sql("UPDATE repair.intake SET link_sent_at = now() - interval '49 hours'")
+    assert intake.sweep(zd) == {} and len(zd.updates) == 1  # off unless the hours are set
+    monkeypatch.setenv("REPAIR_INTAKE_REMINDER_HOURS", "72")
+    assert intake.sweep(zd) == {}  # not old enough yet
+    monkeypatch.setenv("REPAIR_INTAKE_REMINDER_HOURS", "48")
+    assert intake.sweep(zd) == {"reminded": 1}
+    assert intake.sweep(zd) == {}  # once only
+    assert len(zd.updates) == 2
+    u = zd.updates[1]
+    assert u["public"] is True and u["tags"] == ["repair-portal"]
+    assert u["body"].startswith("Hi Jane,") and "reminder" in u["body"]
+    assert "http" not in u["body"] and "/repair/intake/" not in u["body"] and "{" not in u["body"]
+    row = intake.for_ticket(500)
+    assert row["reminder_sent_at"] is not None and row["status"] == "link_sent"
+    assert repair_db.events_for(500)[0]["label"] == "Intake form reminder sent"
+
+
+@needs_db
+def test_no_reminder_once_answered_or_ticket_solved(client, zd, tech, intake_on, public, monkeypatch):
+    monkeypatch.setenv("REPAIR_INTAKE_REMINDER_HOURS", "48")
+    url = _linked(client, zd)
+    zd.tags.clear()  # the fake keeps one tag list for every ticket
+    _add(client, 501)
+    assert intake.for_ticket(501)["status"] == "link_sent"
+    _sql("UPDATE repair.intake SET link_sent_at = now() - interval '49 hours'")
+    assert _submit(public, url).status_code == 303  # 500 has answered
+    sent = len(zd.updates)
+    zd.status = "solved"  # and 501 was solved meanwhile
+    assert intake.sweep(zd) == {} and len(zd.updates) == sent
+    zd.status = "open"
+    assert intake.sweep(zd) == {} and len(zd.updates) == sent  # a skipped reminder is not sent later
+
+
+@needs_db
+def test_rate_limit(client, zd, tech, intake_on, public, monkeypatch):
+    url = _linked(client, zd)
+    monkeypatch.setattr(intake_views, "LIMIT_TOKEN_POSTS", 3)
+    for _ in range(3):
+        assert public.post(url, data={"model": "x"}).status_code == 422
+    resp = _submit(public, url)
+    assert resp.status_code == 429 and b"Please wait a few minutes" in resp.data
+    assert resp.headers["Cache-Control"] == "no-store"
+    assert intake.for_ticket(500)["status"] == "link_sent"  # the limited post was not processed
+    assert public.get(url).status_code == 200  # reading the form is still fine
+
+    # Guessing links is slowed down; a real link is never locked out by it,
+    # even though every customer shares the proxy's address.
+    monkeypatch.setattr(intake_views, "LIMIT_ADDR", 2)
+    monkeypatch.setattr(intake_views, "_hits", {})
+    guess = "/repair/intake/" + "B" * 43
+    assert [public.get(guess).status_code for _ in range(3)] == [404, 404, 429]
+    assert public.get("/repair/intake/nope").status_code == 429
+    assert [public.get(url).status_code for _ in range(5)] == [200] * 5
+    assert client.get("/queue").status_code == 200  # staff pages are not limited
+
+
+@needs_db
+def test_public_form_needs_no_cookie(client, zd, tech, intake_on, public):
+    """The link is the customer's key. A mail-app browser that keeps no cookies can still send the form."""
+    url = _linked(client, zd)
+    flask_app.config["CSRF_CHECK"] = True
+    try:
+        cold = _browser()
+        assert _submit(cold, url, serial="").status_code == 422
+        assert _submit(cold, url).status_code == 303
+        assert intake.for_ticket(500)["status"] == "synced"
+
+        # Staff posts are still checked, including the intake buttons.
+        for path in ("/tech/signout", "/t/500/intake/send", "/t/500/intake/retry", "/intake/retry-failed"):
+            plain = public.post(path)
+            assert plain.status_code == 400 and b"Tell us about your rifle" not in plain.data, path
+    finally:
+        flask_app.config["CSRF_CHECK"] = False
+
+
+@needs_db
+def test_oversize_post_friendly(client, zd, tech, intake_on, public):
+    url = _linked(client, zd)
+    resp = public.post(url, data=b"x", content_type="multipart/form-data; boundary=x",
+                       environ_overrides={"CONTENT_LENGTH": str(intake.MAX_POST_BYTES + 1)})
+    assert resp.status_code == 413
+    page = resp.get_data(as_text=True)
+    assert "Those files are too big to send together" in page and "reply to the email" in page
+    assert "120 MB max" not in page  # not the staff wording
+    assert intake.for_ticket(500)["status"] == "link_sent"
+    # Staff uploads keep their own page.
+    assert intake.MAX_POST_BYTES < flask_app.config["MAX_CONTENT_LENGTH"]
+
+
+@needs_db
+def test_post_to_dead_link_is_refused_before_the_body(client, zd, tech, intake_on, public):
+    _linked(client, zd)
+    flask_app.config["CSRF_CHECK"] = True  # the guard answers before the CSRF check reads the body
+    try:
+        resp = _submit(public, "/repair/intake/" + "B" * 43)
+        assert resp.status_code == 404 and b"This link is no longer active" in resp.data
+        assert _submit(public, "/repair/intake/short").status_code == 404
+    finally:
+        flask_app.config["CSRF_CHECK"] = False
+    assert intake.for_ticket(500)["status"] == "link_sent"
+
+
+@needs_db
+def test_staff_views(client, zd, tech, intake_on, public):
+    url = _linked(client, zd)
+    assert b"form sent" in client.get("/queue").data
+    page = client.get("/t/500").get_data(as_text=True)
+    assert "Customer intake form" in page and "Waiting for the customer." in page
+    assert "Send a new link" in page and "Retry Zendesk" not in page
+    assert _link_token(zd) not in page  # the link itself is never shown to staff
+
+    assert _submit(public, url, photos=[_file("a.jpg", _img())]).status_code == 303
+    board = client.get("/queue").get_data(as_text=True)
+    assert "form in" in board and "form sent" not in board
+    assert "Customer intake forms that need a look" not in board
+    page = client.get("/t/500").get_data(as_text=True)
+    assert "The answers are on the Zendesk ticket" in page
+    for shown in ("Accuracy, Stock or chassis", "Please check the crown", "Groups opened up to 3 MOA."):
+        assert shown in page, shown
+    assert "Send link" not in page and "Send a new link" not in page and "Retry Zendesk" not in page
+    assert "photo-1.jpg" in page  # the customer's photo shows with the ticket's other files
+
+    # Not signed in: the panel is there, the answers are not.
+    resp = public.get("/t/500")
+    page = resp.get_data(as_text=True)
+    assert resp.status_code == 200 and "Customer intake form" in page and "Sign in to see the answers." in page
+    for hidden in ("Accuracy, Stock or chassis", "Please check the crown"):
+        assert hidden not in page, hidden
+    assert public.get("/queue").status_code == 200
+
+
+@needs_db
+def test_staff_pages_render_without_an_intake_row(client, zd, tech, intake_on, monkeypatch):
+    from tests import demo_history
+
+    assert demo_history.seed(TEST_DSN) == 150
+    assert intake.for_ticket(6001) is None and intake.needs_attention() == []
+    resp = client.get("/t/6001")
+    assert resp.status_code == 200 and b"No link has been sent for this ticket." in resp.data
+    assert client.get("/queue").status_code == 200
+    monkeypatch.setenv("REPAIR_INTAKE_ENABLED", "0")
+    resp = client.get("/t/6001")
+    assert resp.status_code == 200 and b"Customer intake form" not in resp.data
+    assert client.get("/queue").status_code == 200 and client.get("/t/6001/report").status_code == 200
+
+
+def test_intake_helpers(monkeypatch):
+    raw, hashed = intake.new_token()
+    assert intake.TOKEN_RE.match(raw) and hashed == hashlib.sha256(raw.encode()).hexdigest()
+    assert intake.new_token()[0] != raw
+
+    monkeypatch.setenv("REPAIR_INTAKE_GO_LIVE_AT", "2026-10-01")
+    cutoff, ok = intake.go_live_at()
+    assert ok and cutoff == datetime(2026, 10, 1, tzinfo=timezone.utc)  # a bare date is UTC
+    monkeypatch.setenv("REPAIR_INTAKE_GO_LIVE_AT", "soon")
+    assert intake.go_live_at() == (None, False)
+    monkeypatch.delenv("REPAIR_INTAKE_GO_LIVE_AT")
+    assert intake.go_live_at() == (None, True)
+
+    for value, on in (("1", True), ("TRUE", True), ("yes", True), ("on", True), ("0", False), ("", False)):
+        monkeypatch.setenv("REPAIR_INTAKE_ENABLED", value)
+        assert intake.enabled() is on
+
+    answers, errors = intake.validate({"model": "  Ridgeline \n FFT ", "issue": " a\r\nb\x00 ", "serial": "S" * 500})
+    assert answers["model"] == "Ridgeline FFT" and answers["issue"] == "a\nb" and len(answers["serial"]) == 120
+    assert set(errors) == {"caliber"}
+    assert intake.pick_concerns(["Feeding", "<b>", "Accuracy"], ["Accuracy", "Feeding", "Other"]) == ["Accuracy", "Feeding"]
+    assert set(answers) == {name for name, *_rest in intake.FIELDS}
+
+    text = intake.comment_text({"id": 7, "answers": {"model": "Ridgeline", "issue": "a\nb"}})
+    assert "Model: Ridgeline" in text and text.endswith("Intake form reference RI-7")
+
+
+@needs_db
+def test_form_asks_for_no_contact_details(client, zd, tech, intake_on, public):
+    """Name, address and phone stay with customer service: the form never asks, shows or sends them."""
+    url = _linked(client, zd)
+    page = public.get(url).get_data(as_text=True)
+    for field in ("ship_", "name=\"phone\"", "dealer", 'type="tel"', 'type="email"', "Jane Hunter", "jane@example.com"):
+        assert field not in page, field
+    assert _submit(public, url, ship_street="12 Elk Ridge Rd", phone="435-555-0100", dealer="Scheels").status_code == 303
+    row = intake.for_ticket(500)
+    assert set(row["answers"]) == {name for name, *_rest in intake.FIELDS} | {"concerns", "photo_count"}
+    html = zd.updates[-1]["html_body"]
+    for private in ("12 Elk Ridge Rd", "435-555-0100", "Scheels"):
+        assert private not in html and private not in str(row["answers"])
+
+
+@needs_db
+def test_concern_tick_boxes(client, zd, tech, intake_on, public):
+    url = _linked(client, zd)
+    page = public.get(url).get_data(as_text=True)
+    for label in ("Accuracy", "Pressure signs", "Feeding", "Ejection or extraction", "Stock or chassis"):
+        assert f'name="concerns" value="{label}"' in page
+    assert " checked" not in page
+
+    assert _submit(public, url, concerns=["Stock or chassis", "Accuracy", "<script>"]).status_code == 303
+    row = intake.for_ticket(500)
+    assert row["answers"]["concerns"] == ["Accuracy", "Stock or chassis"]  # list order, unknown values dropped
+    html = zd.updates[-1]["html_body"]
+    assert "<strong>Concerns:</strong> Accuracy, Stock or chassis" in html
+    assert html.index("Concerns:") < html.index("Model:")  # first thing the agent reads
+    assert "Accuracy, Stock or chassis" in client.get("/t/500").get_data(as_text=True)
+
+    # The list is the editable one under Settings; none ticked is fine.
+    assert 'Customer concerns' in client.get("/admin/").get_data(as_text=True)
+
+
+@needs_db
+def test_refused_resend_keeps_the_customers_link(client, zd, tech, intake_on, public):
+    """Zendesk said no, so no new email exists: the link the customer has must keep working."""
+    url = _linked(client, zd)
+    before = intake.for_ticket(500)["token_hash"]
+    zd.fail, zd.fail_status = True, 422
+    resp = client.post("/t/500/intake/send", follow_redirects=True)
+    zd.fail = False
+    row = intake.for_ticket(500)
+    assert row["status"] == "link_sent" and row["token_hash"] == before and row["last_error"]
+    assert len(zd.updates) == 1 and public.get(url).status_code == 200
+    # The next press works and replaces the link as usual.
+    client.post("/t/500/intake/send")
+    assert intake.for_ticket(500)["token_hash"] != before and public.get(url).status_code == 404
+
+
+@needs_db
+def test_confirmation_keeps_the_photo_count(client, zd, tech, intake_on, public):
+    url = _linked(client, zd)
+    assert _submit(public, url, photos=[_file("a.jpg", _img()), _file("b.jpg", _img())]).status_code == 303
+    assert intake.for_ticket(500)["status"] == "synced"
+    assert "2 attached" in public.get(url).get_data(as_text=True)
+    assert "photo_count" not in zd.updates[-1]["html_body"]
+
+
+@needs_db
+def test_public_only_mode_serves_nothing_but_the_form(client, zd, tech, intake_on, public, monkeypatch):
+    """repairs.example.com: the internet-facing copy shows the customer form and nothing else."""
+    url = _linked(client, zd)
+    monkeypatch.setenv("PORTAL_PUBLIC_ONLY", "1")
+    for path in ("/", "/queue", "/incoming", "/scan", "/t/500", "/ticket/500", "/t/500/report", "/report/",
+                 "/final-reports", "/ad/", "/admin/", "/tech", "/lookup?ticket=500", "/repair/intake"):
+        for who in (public, client):  # even a signed-in tech's cookie opens nothing here
+            resp = who.get(path)
+            assert resp.status_code == 404 and b"Repair portal" not in resp.data, path
+    for path in ("/t/500/add", "/t/500/intake/send", "/t/500/intake/retry", "/intake/retry-failed",
+                 "/tech", "/admin/choice", "/t/500/stage/received"):
+        assert client.post(path, data={"pin": "1234"}).status_code == 404, path
+    assert len(zd.updates) == 1
+
+    assert public.get("/healthz").status_code == 200
+    assert public.get("/static/portal.css").status_code == 200
+    assert public.get(url).status_code == 200
+    assert _submit(public, url).status_code == 303
+    assert intake.for_ticket(500)["status"] == "synced"
+
+    monkeypatch.delenv("PORTAL_PUBLIC_ONLY")
+    assert client.get("/queue").status_code == 200
+
+
+@needs_db
+def test_replaced_link_cannot_submit_even_mid_upload(client, zd, tech, intake_on, public):
+    """The post was accepted on the old link, then staff replaced it before the answers were saved."""
+    old_url = _linked(client, zd)
+    row = intake.find_by_token(old_url.rsplit("/", 1)[1])  # what guard_request resolved before the upload
+    client.post("/t/500/intake/send")                      # staff send a new link meanwhile
+    assert intake.save_submission(row["id"], dict(ANSWERS), [], token_hash=row["token_hash"]) is False
+    now = intake.for_ticket(500)
+    assert now["status"] == "link_sent" and not now["answers"]
+    new_url = "/repair/intake/" + _link_token(zd)
+    assert new_url != old_url and _submit(public, new_url).status_code == 303
+    assert intake.for_ticket(500)["status"] == "synced"
+
+
+@needs_db
+def test_link_retry_saves_its_hash_before_posting(client, zd, tech, intake_on, public, monkeypatch):
+    """If the worker dies after Zendesk took the retried link, the stored hash must be the emailed one."""
+    zd.fail, zd.fail_status = True, 503
+    _add(client)
+    zd.fail = False
+    assert intake.for_ticket(500)["status"] == "pending_link"
+    _sql("UPDATE repair.intake SET next_attempt_at = now() - interval '1 minute'")
+
+    posted = {}
+    real_post = zd.post_update
+
+    def post_then_die(ticket_id, body, **kw):
+        real_post(ticket_id, body, **kw)  # Zendesk has the comment and the tag...
+        posted["token"] = re.search(r"/repair/intake/([A-Za-z0-9_-]{43})", body).group(1)
+        raise KeyboardInterrupt  # ...and the process is killed before it can record that
+
+    monkeypatch.setattr(zd, "post_update", post_then_die)
+    ticket, requester, _org = zd.get_ticket(500)
+    with pytest.raises(KeyboardInterrupt):
+        intake.resend_link(zd, ticket, requester)
+    monkeypatch.undo()
+    monkeypatch.setenv("REPAIR_INTAKE_ENABLED", "1")
+    monkeypatch.setenv("REPAIR_INTAKE_BASE_URL", "https://repairs.example.com")
+
+    row = intake.for_ticket(500)
+    assert row["status"] == "pending_link" and row["token_hash"] == intake.hash_token(posted["token"])
+    _sql("UPDATE repair.intake SET next_attempt_at = now() - interval '1 minute'")
+    sent = len(zd.updates)
+    assert intake.sweep(zd).get("links") == 1 and len(zd.updates) == sent  # recovered, no second email
+    assert intake.for_ticket(500)["status"] == "link_sent"
+    assert public.get("/repair/intake/" + posted["token"]).status_code == 200  # the emailed link works
+
+
+@needs_db
+def test_staff_resend_that_dies_does_not_bless_an_unsent_link(client, zd, tech, intake_on, public, monkeypatch):
+    """First link landed (response lost). A staff resend dies before posting. The sweep must not
+    then mark the never-emailed replacement as sent."""
+    real_post = zd.post_update
+
+    def lands_but_times_out(ticket_id, body, **kw):
+        real_post(ticket_id, body, **kw)
+        raise ZendeskError("timed out")
+
+    monkeypatch.setattr(zd, "post_update", lands_but_times_out)
+    _add(client)
+    assert intake.for_ticket(500)["status"] == "pending_link" and "repair_intake_sent" in zd.tags
+
+    def dies(*_a, **_kw):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(zd, "post_update", dies)
+    ticket, requester, _org = zd.get_ticket(500)
+    with pytest.raises(KeyboardInterrupt):
+        intake.resend_link(zd, ticket, requester, tech, manual=True)
+    monkeypatch.setattr(zd, "post_update", real_post)
+
+    row = intake.for_ticket(500)
+    assert row["status"] == "pending_link" and row["next_attempt_at"] is None
+    assert intake.sweep(zd, force=True).get("links") is None
+    assert intake.for_ticket(500)["status"] == "pending_link"  # still shown to staff as not sent
+    assert any(r["ticket_id"] == 500 for r in intake.needs_attention()) or row["last_error"] is None
+
+
+@needs_db
+def test_resend_while_the_customer_submits_keeps_their_answers(client, zd, tech, intake_on, public, monkeypatch):
+    url = _linked(client, zd)
+    row = intake.find_by_token(url.rsplit("/", 1)[1])
+    real_post = zd.post_update
+    state = {"done": False}
+
+    def customer_submits_first(ticket_id, body, **kw):
+        if not state["done"]:
+            state["done"] = True
+            assert intake.save_submission(row["id"], dict(ANSWERS), [], token_hash=row["token_hash"])
+        return real_post(ticket_id, body, **kw)
+
+    monkeypatch.setattr(zd, "post_update", customer_submits_first)
+    ticket, requester, _org = zd.get_ticket(500)
+    assert intake.resend_link(zd, ticket, requester, tech, manual=True) == "submitted"
+    now = intake.for_ticket(500)
+    assert now["status"] == "submitted" and now["answers"]["serial"] == "CA12345"
+    assert now["token_hash"] == row["token_hash"]
+    labels = [e["label"] for e in repair_db.events_for(500)]
+    assert "New intake form link sent" not in labels

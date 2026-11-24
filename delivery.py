@@ -145,6 +145,14 @@ def main(argv=None) -> int:
     zendesk = ZendeskClient(os.environ["ZENDESK_SUBDOMAIN"], os.environ["ZENDESK_EMAIL"],
                             os.environ["ZENDESK_API_TOKEN"])
     while True:
+        # Its own block: check_all returns early with no tracking provider, and a
+        # failed sweep must not stop the delivery check (or the other way round).
+        try:
+            import intake
+
+            logger.info("Intake sweep: %s", intake.sweep(zendesk) or "nothing due")
+        except Exception:
+            logger.exception("Intake sweep failed")
         try:
             logger.info("Delivery check: %s", check_all(zendesk) or "nothing due")
         except Exception:
