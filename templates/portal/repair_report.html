@@ -32,6 +32,8 @@
         <div><dt>Email</dt><dd>{{ (requester.email if requester else rma.requester_email) or '—' }}</dd></div>
         <div><dt>Status</dt><dd>{{ current_label }}{% if rma.flag %} &middot; {{ rma.flag }}{% endif %}</dd></div>
         <div><dt>Report date</dt><dd>{{ now|localtime('%b %d, %Y') }}</dd></div>
+        {% if rifle.model or rifle.caliber %}<div><dt>Rifle</dt><dd>{{ [rifle.model, rifle.caliber]|select|join(' · ') }}</dd></div>{% endif %}
+        {% if rifle.serial %}<div><dt>Serial</dt><dd class="mono">{{ rifle.serial }}</dd></div>{% endif %}
       </dl>
     </header>
 
@@ -97,6 +99,8 @@
         <dt>Date</dt><dd>{{ rma.repaired_at|localtime('%b %d, %Y') }}</dd>
         <dt>Repairs done</dt><dd>{{ rma.solution_summary or '—' }}</dd>
         {% if rma.work_done %}<dt>Work notes</dt><dd>{{ rma.work_done }}</dd>{% endif %}
+        {% if rma.parts_used %}<dt>Parts used</dt><dd>{{ rma.parts_used }}</dd>{% endif %}
+        {% if rma.trigger_pull_after is not none %}<dt>Trigger pull</dt><dd>{{ '%g'|format(rma.trigger_pull_after|float) }} lb{% if rma.trigger_pull_found is not none %} (was {{ '%g'|format(rma.trigger_pull_found|float) }} lb){% endif %}</dd>{% endif %}
       </dl>
       {% else %}<p class="empty">Repair not complete yet.</p>{% endif %}
     </section>
@@ -122,7 +126,9 @@
       {% if rma.shipped_at %}
       <dl class="report-dl">
         <dt>Shipped</dt><dd>{{ rma.shipped_at|localtime('%b %d, %Y') }}</dd>
-        <dt>Tracking number</dt><dd class="mono">{{ rma.tracking_number or '—' }}</dd>
+        {% if rma.function_check %}<dt>Final safety &amp; function check</dt><dd>{{ 'Passed' if rma.function_check == 'pass' else 'Not passed' }}</dd>{% endif %}
+        <dt>Tracking number</dt><dd class="mono">{{ rma.tracking_number or '—' }}{% if rma.return_carrier %} ({{ rma.return_carrier }}){% endif %}</dd>
+        {% if rma.delivered_at %}<dt>Delivered</dt><dd>{{ rma.delivered_at|localtime('%b %d, %Y') }}</dd>{% endif %}
       </dl>
       {% else %}<p class="empty">Not shipped yet.</p>{% endif %}
     </section>

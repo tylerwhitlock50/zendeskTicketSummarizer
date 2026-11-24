@@ -259,6 +259,37 @@
       <tr><td>Partly matched</td><td>{{ data.complaint.get('partly', 0) }}</td></tr>
       <tr><td>Did not match</td><td>{{ data.complaint.get('no', 0) }}</td></tr>
       <tr><td>Arrived damaged</td><td>{{ data.arrivals.damaged }} of {{ data.arrivals.received }}</td></tr>
+      <tr><td>Arrived loaded</td><td>{{ data.qc.arrived_loaded }}</td></tr>
+      <tr><td>Serial didn't match the ticket</td><td>{{ data.qc.serial_mismatch }}</td></tr>
+      <tr><td>Inbound tracking didn't match</td><td>{{ data.qc.inbound_mismatch }}</td></tr>
+      <tr><td>Final safety check failed</td><td>{{ data.final_checks.failed }} of {{ data.final_checks.passed + data.final_checks.failed }}</td></tr>
+      <tr><td>Shipped on manager override</td><td>{{ data.shipped_overrides }}</td></tr>
+    </table>
+  </div>
+</div>
+
+<div class="report-counts">
+  <div class="count-card">
+    <h2>Root causes <span class="subtle">repairs completed</span></h2>
+    <table>
+      {% for r in data.root_causes %}<tr><td>{{ r.label }}</td><td>{{ r.n }}</td></tr>
+      {% else %}<tr><td class="empty">No repairs in this period.</td></tr>{% endfor %}
+    </table>
+  </div>
+  <div class="count-card">
+    <h2>Coverage</h2>
+    <table>
+      {% for key, word in (('warranty', 'Warranty'), ('customer_pay', 'Customer pay'), ('goodwill', 'Goodwill'), ('not_recorded', 'Not recorded')) %}
+      {% if data.coverage.get(key) or key != 'not_recorded' %}<tr><td>{{ word }}</td><td>{{ data.coverage.get(key, 0) }}</td></tr>{% endif %}
+      {% endfor %}
+    </table>
+  </div>
+  <div class="count-card">
+    <h2>Deliveries</h2>
+    {% set d = data.deliveries %}
+    <table>
+      <tr><td>Delivered</td><td>{{ d.delivered }}</td></tr>
+      <tr><td>Average time in transit</td><td>{{ '%.1f days'|format(d.avg_transit_days) if d.avg_transit_days is not none else '—' }}</td></tr>
     </table>
   </div>
 </div>
@@ -277,7 +308,7 @@
       <td>{{ name }}</td>
       <td>{{ counts.get('added', 0) }}</td>
       {% for key in board_stages if key != 'queued' %}<td>{{ counts.get(key, 0) }}</td>{% endfor %}
-      <td>{{ counts.get('action', 0) + counts.get('note', 0) }}</td>
+      <td>{{ counts.get('action', 0) + counts.get('note', 0) + counts.get('delivery', 0) + counts.get('report', 0) }}</td>
       <td><strong>{{ counts.total }}</strong></td>
     </tr>
     {% else %}

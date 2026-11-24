@@ -10,17 +10,38 @@ and sends the emails; this app keeps the shop-side repair record.
 2. **Incoming**: CS tags an approved RMA ticket `repair_process` in Zendesk.
    `/incoming` runs a Zendesk search for that tag and lists tickets not yet in
    the queue; adding one starts its repair record (nothing is sent to the customer).
-3. **Stage screen**: scan the sheet to open `/t/<id>` and post a stage:
-   **Received**, **Inspected** (problem drop-down + internal notes),
-   **Repair complete** (solution drop-down + work done), **Shipped** (tracking
-   number). Each stage is ONE Zendesk ticket update: a public comment, the tags
+3. **Stage screen**: scan the sheet (or the rifle's serial, or the box's
+   tracking label) to open `/t/<id>` and post a stage. Each form is a QC step:
+   - **Received**: chamber/magazine safety check, serial scanned from the rifle
+     and checked against the ticket, inbound tracking checked against the ticket,
+     model / caliber / part number confirmed, accessories, arrival condition.
+     A serial that doesn't match is saved as an internal note and flagged for CS
+     (the customer is not emailed).
+   - **Inspected**: inspection checklist, headspace, trigger pull as found,
+     problems found, complaint match.
+   - **Repair complete**: repairs, work done, parts replaced, root cause and
+     coverage (warranty / customer pay / goodwill; internal), trigger pull after.
+   - **Final test**: final safety and function check plus the accuracy test.
+   - **Shipped**: the serial going in the box must match the rifle received,
+     unloaded / no-ammo confirmation, return tracking (carrier detected). It is
+     blocked until the final check passes unless a manager OKs "Ship anyway".
+
+   Each stage is ONE Zendesk ticket update: a public comment, the tags
    `repair-portal` + `rp-<stage>`, and optionally an "RMA Stage" field. Zendesk's
    standard "Notify requester and CCs of comment update" trigger emails the customer.
 4. **Repair record**: every add, stage, quick action and note is saved in
    Postgres (schema `repair`) with who and when, plus the form answers.
-5. **Queue** (`/queue`): RMAs by stage. **Report** (`/report`): a weekly view of
-   stage counts, turnaround, problems, repairs and work by person, with CSV
-   downloads of RMAs and all activity.
+5. **Delivery**: shipped RMAs are tracked (EasyPost or Shippo, via the
+   `delivery-checker` service). When the carrier shows the rifle delivered, a
+   "delivered" public comment emails the customer, once. Without a tracking
+   service, techs press **Mark delivered** on the ticket.
+6. **Final reports** (`/final-reports`): every repair gets a customer-facing
+   report drafted from its record (internal notes, root cause and coverage left
+   out). Review it, edit if needed, and send: one public comment.
+7. **Queue** (`/queue`): RMAs by stage. **Weekly report** (`/report`): stage
+   counts, turnaround, problems, repairs, root causes, coverage, QC checks,
+   deliveries and work by person, with CSV downloads of RMAs (including the
+   ticket's product fields, for matching to products) and all activity.
 
 People sign in on a shop device with their **name and PIN** (set up in
 Settings). They don't need Zendesk seats: posts go through the API user.
@@ -50,6 +71,8 @@ Values in `.env`:
 | `ADMIN_PASSWORD` | Password for Settings. Unset → Settings are open to anyone on the network |
 | `TECH_SESSION_HOURS` | How long a name + PIN sign-in lasts on a device, default 12 |
 | `FLASK_SECRET_KEY` | Random string in production (sessions, sign-ins, CSRF) |
+| `TRACKING_PROVIDER` | `easypost` or `shippo` to detect deliveries automatically. Unset → "Mark delivered" by hand |
+| `EASYPOST_API_KEY` / `SHIPPO_API_KEY` | The tracking service's API key |
 
 With `DATABASE_URL` set, create the tables (also run automatically on container
 start):
@@ -61,9 +84,11 @@ venv\Scripts\python migrations\migrate.py
 Then open **Settings** (`/admin/`) and:
 
 - add the people who post (name + 4–8 digit PIN);
-- replace the starter **Problems** and **Solutions** lists with the Repair Center's;
-- adjust each stage's customer message. Placeholders: `{problem}`, `{solution}`,
-  `{work_done}`, `{tracking}`.
+- replace the starter **Problems**, **Solutions** and **Root causes** lists with the Repair Center's;
+- check **Zendesk ticket fields**: which ticket fields hold the serial number,
+  model, caliber, part number and inbound tracking (matched by title until you pick);
+- adjust each stage's customer message, the **delivered** message and the
+  **final report template** (placeholders are listed next to each).
 
 ### Zendesk checklist before going live
 
@@ -85,7 +110,8 @@ venv\Scripts\python app.py
 - http://localhost:5000: ticket lookup → printable sheet
 - http://localhost:5000/queue: repair queue board
 - http://localhost:5000/incoming: tagged tickets waiting to be added
-- http://localhost:5000/scan: scan station (scanner types the ID + Enter)
+- http://localhost:5000/scan: scan station: the one-pager barcode, a rifle serial or a box's tracking label
+- http://localhost:5000/final-reports: final repair reports to review and send
 - http://localhost:5000/t/&lt;ticket_id&gt;: stage screen (what the QR opens)
 - http://localhost:5000/report/: weekly repair report + CSV downloads
 - http://localhost:5000/admin/: Settings
@@ -133,6 +159,10 @@ With a filled-in `.env` next to `docker-compose.yml`:
 ```bash
 docker compose up -d --build
 ```
+
+This also starts `delivery-checker`, which checks return tracking every 30
+minutes (`python delivery.py --loop 1800`) and idles until `TRACKING_PROVIDER`
+is set. Run one pass by hand with `python delivery.py`.
 
 Dev overlay with a local Postgres (port 5433):
 

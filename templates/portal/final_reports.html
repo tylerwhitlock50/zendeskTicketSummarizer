@@ -1,0 +1,44 @@
+{% extends "portal/base.html" %}
+{% block title %}Final reports{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>Final repair reports</h1>
+</div>
+<p class="tagline">Each repair gets a written report for the customer, drafted from its repair record.
+  Review it, edit if needed, and send: it goes out as one public reply on the Zendesk ticket.</p>
+
+{% if queue is none %}
+<div class="notice warn">Database not configured. Set <code>DATABASE_URL</code> and run migrations.</div>
+{% else %}
+{% macro rows(items, kind) %}
+<table class="report-table final-table">
+  <thead><tr><th>Ticket</th><th>Rifle</th><th>Customer</th><th>{% if kind == 'sent' %}Sent{% elif kind == 'ready' %}Shipped{% else %}Stage{% endif %}</th><th>Draft</th><th></th></tr></thead>
+  <tbody>
+  {% for r in items %}
+    <tr>
+      <td><a href="{{ url_for('portal.action_page', ticket_id=r.ticket_id) }}">#{{ r.ticket_id }}</a></td>
+      <td>{{ r.model or r.zd_model or '—' }} <span class="mono subtle">{{ r.serial_number or r.zd_serial or '' }}</span></td>
+      <td>{{ r.requester_name or '' }}</td>
+      <td>{% if kind == 'sent' %}{{ r.report_sent_at|localtime }}
+          {% elif kind == 'ready' %}{{ r.shipped_at|localtime('%b %d') }}{% if r.delivered_at %} <span class="ok-tag">delivered</span>{% endif %}
+          {% else %}{{ {'repaired': 'Repair complete', 'tested': 'Final test'}.get(r.stage, r.stage) }}{% endif %}</td>
+      <td>{% if r.report_edited %}<span class="ok-tag">edited</span>{% else %}<span class="subtle">from record</span>{% endif %}</td>
+      <td class="right"><a class="small-btn" href="{{ url_for('portal.final_report', ticket_id=r.ticket_id) }}">{% if kind == 'sent' %}View{% elif kind == 'ready' %}Review and send{% else %}Open draft{% endif %}</a></td>
+    </tr>
+  {% else %}
+    <tr><td colspan="6" class="empty">{% if kind == 'ready' %}Nothing to review. Reports show here once a rifle ships.{% elif kind == 'sent' %}None sent in the last 14 days.{% else %}None.{% endif %}</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endmacro %}
+
+<h2 class="section-head">Ready to review <span class="count">{{ queue.ready|length }}</span></h2>
+{{ rows(queue.ready, 'ready') }}
+
+<h2 class="section-head">Still in the shop <span class="subtle">drafts can be started; send once shipped</span> <span class="count">{{ queue.in_progress|length }}</span></h2>
+{{ rows(queue.in_progress, 'in_progress') }}
+
+<h2 class="section-head">Sent <span class="subtle">last 14 days</span> <span class="count">{{ queue.sent|length }}</span></h2>
+{{ rows(queue.sent, 'sent') }}
+{% endif %}
+{% endblock %}

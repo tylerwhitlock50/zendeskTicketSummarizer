@@ -74,6 +74,27 @@ SUBJECTS = {
 }
 
 
+# Zendesk ticket fields the demo tickets carry (what CS fills in on the RMA form).
+DEMO_FIELDS = {
+    9001: {"id": 9001, "title": "Rifle model", "type": "tagger", "active": True,
+           "custom_field_options": [{"name": "Ridgeline FFT", "value": "ridgeline_fft"},
+                                    {"name": "Mesa", "value": "mesa"},
+                                    {"name": "MPR", "value": "mpr"},
+                                    {"name": "Traverse", "value": "traverse"}]},
+    9002: {"id": 9002, "title": "Caliber", "type": "text", "active": True},
+    9003: {"id": 9003, "title": "Serial number", "type": "text", "active": True},
+    9004: {"id": 9004, "title": "Inbound tracking number", "type": "text", "active": True},
+    9005: {"id": 9005, "title": "Purchase date", "type": "date", "active": True},
+    9006: {"id": 9006, "title": "Dealer", "type": "text", "active": True},
+}
+DEMO_VALUES = {
+    7101: ("ridgeline_fft", "6.5 Creedmoor", "CA10042", "1Z999AA10123456784", "2024-09-14", "Sportsman's Outpost"),
+    7102: ("mesa", "7mm PRC", "CA20817", "776543219876", "2025-03-02", "High Country Arms"),
+    7103: ("mpr", "6.5 PRC", "CA31155", "9400111899223344556677", "2023-11-20", "Online"),
+    7104: ("traverse", ".300 Win Mag", "CA40990", None, "2025-06-30", "Big Game Supply"),
+}
+
+
 class DemoZendesk:
     """Answers like Zendesk; logs posts to the console instead of sending them.
 
@@ -89,9 +110,11 @@ class DemoZendesk:
         subject, name, complaint = SUBJECTS.get(
             ticket_id, (f"Repair request {ticket_id}", "Demo Customer", "Please take a look at my rifle.")
         )
+        values = DEMO_VALUES.get(ticket_id, (None,) * 6)
+        custom = [{"id": fid, "value": v} for fid, v in zip(sorted(DEMO_FIELDS), values)]
         ticket = {"id": ticket_id, "subject": subject, "status": "open", "description": complaint,
                   "updated_at": "2026-11-23T16:00:00Z", "created_at": "2026-11-18T16:00:00Z",
-                  "custom_fields": [], "ticket_form_id": None}
+                  "custom_fields": custom, "ticket_form_id": None}
         return ticket, {"id": 1, "name": name, "email": "customer@example.com"}, None
 
     def upload_file(self, filename, data, content_type):
@@ -128,7 +151,7 @@ class DemoZendesk:
         return list(self.comments.get(ticket_id, [])), {2: {"id": 2, "name": "Repair portal"}}
 
     def get_ticket_fields(self):
-        return {}
+        return DEMO_FIELDS
 
     def get_ticket_form(self, form_id):
         return None

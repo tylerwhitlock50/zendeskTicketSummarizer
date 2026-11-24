@@ -11,13 +11,17 @@ import logging
 import os
 import re
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 from flask import Blueprint, Response, abort, flash, redirect, render_template, request, url_for
 
 import auth
 import db
+import delivery
 import files
 import repair_db
+import repair_settings
+import tracking
 from zendesk_client import ZendeskClient, ZendeskError
 
 logger = logging.getLogger(__name__)
@@ -28,6 +32,8 @@ NOTE_EXCERPT_CHARS = 200
 QUEUED_TAG = "rp-queued"  # added in Zendesk when a ticket joins the queue (keeps Incoming short)
 DUPLICATE_WINDOW_SECONDS = 120  # a double-tap must not email the customer twice
 TRACKING_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 \-]{4,63}$")
+SERIAL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 \-/.]{2,39}$")
+TICKET_ID_MAX_DIGITS = 9  # longer all-digit scans are tracking numbers, not ticket IDs
 
 _client = None
 
@@ -72,7 +78,8 @@ def render_message(template, values):
         key = match.group(1)
         return str(values[key]) if key in values else match.group(0)
 
-    return re.sub(r"\{(\w+)\}", sub, template)
+    text = re.sub(r"\{(\w+)\}", sub, template)
+    return re.sub(r"(?<=\S) {2,}(?=\S)", " ", text)  # an empty placeholder leaves no double space
 
 
 def _need_tech():
@@ -95,13 +102,67 @@ def scan():
     return render_template("portal/scan.html", error=request.args.get("error"))
 
 
+_CODE_FIELDS = (
+    ("serial_number", "serial number"), ("ship_serial", "serial number"), ("zd_serial", "serial number"),
+    ("tracking_number", "return tracking number"), ("inbound_tracking", "inbound tracking number"),
+    ("zd_inbound_tracking", "inbound tracking number"),
+)
+
+
+def _matched_by(rma, code):
+    norm = repair_db.normalize_code(code)
+    for col, words in _CODE_FIELDS:
+        if repair_db.normalize_code(rma.get(col)) == norm:
+            return words
+    return "scan"
+
+
 @portal_bp.route("/scan/go")
 def scan_go():
-    raw = (request.args.get("ticket_id") or "").strip()
-    match = re.search(r"(\d+)\s*/?\s*$", raw)  # bare ID, scanned digits, or agent URL
-    if not match:
-        return redirect(url_for("portal.scan", error="Scan or type a numeric ticket ID."))
-    return redirect(url_for("portal.action_page", ticket_id=int(match.group(1))))
+    """Open a ticket from whatever was scanned or typed.
+
+    The one-pager barcode (ticket ID) or QR/agent URL opens the ticket. A rifle
+    serial or a box's tracking label finds its RMA; anything else is searched
+    in Zendesk (for a box that arrived before its ticket was added).
+    """
+    raw = " ".join((request.args.get("ticket_id") or "").split())
+    if not raw:
+        return redirect(url_for("portal.scan", error="Scan a barcode or type a ticket number."))
+    url = re.search(r"/(?:tickets|t)/(\d+)\b", raw)
+    if url:
+        return redirect(url_for("portal.action_page", ticket_id=int(url.group(1))))
+    short_id = raw.lstrip("#")
+    is_ticket_id = short_id.isdigit() and len(short_id) <= TICKET_ID_MAX_DIGITS
+    if is_ticket_id and (not db.available() or repair_db.rma_ids([int(short_id)])):
+        return redirect(url_for("portal.action_page", ticket_id=int(short_id)))
+
+    if db.available():
+        found = repair_db.find_by_code(raw)
+        if len(found) == 1:
+            flash(f"Found ticket #{found[0]['ticket_id']} by its {_matched_by(found[0], raw)}.", "success")
+            return redirect(url_for("portal.action_page", ticket_id=found[0]["ticket_id"]))
+        if found:
+            return render_template("portal/scan.html", code=raw, rmas=found, tickets=None,
+                                   error=None)
+    if is_ticket_id:
+        return redirect(url_for("portal.action_page", ticket_id=int(short_id)))
+
+    # Not in the queue: maybe a box for a ticket that hasn't been added yet.
+    try:
+        phrase = raw.replace('"', "")
+        tickets = list(_get_zendesk().search_export(f'"{phrase}"', max_pages=1))[:20]
+    except ZendeskError as exc:
+        return redirect(url_for("portal.scan", error=f"No RMA matches “{raw}”, and Zendesk search failed: {exc}"))
+    if len(tickets) == 1:
+        flash(f"Found ticket #{tickets[0]['id']} in Zendesk by “{raw}”.", "success")
+        return redirect(url_for("portal.action_page", ticket_id=tickets[0]["id"]))
+    if not tickets:
+        return redirect(url_for(
+            "portal.scan",
+            error=f"Nothing matches “{raw}”. Scan the barcode on the one-pager, the rifle's serial, "
+                  "or the box's tracking label, or type the ticket number.",
+        ))
+    return render_template("portal/scan.html", code=raw, rmas=None, tickets=tickets, error=None)
 
 
 # ---------------------------------------------------------------- tech sign-in
@@ -159,6 +220,8 @@ def queue():
         columns=repair_db.board(),
         stages=stages,
         board_stages=repair_db.BOARD_STAGES,
+        status_words=tracking.STATUS_WORDS,
+        tracking_service=tracking.provider_ready(),
     )
 
 
@@ -204,6 +267,7 @@ def add_to_queue(ticket_id):
         (requester or {}).get("name"),
         (requester or {}).get("email"),
         tech,
+        snapshot=_snapshot(ticket),
     )
     if added:
         try:  # tags only, no comment: Zendesk sends no email for this
@@ -264,6 +328,12 @@ def action_page(ticket_id):
             ctx["gallery_error"] = f"Couldn't load the ticket's files from Zendesk: {exc}"
 
     rma = repair_db.get_rma(ticket_id)
+    snap = _snapshot(ticket)
+    if rma and snap is not None and any(
+        rma.get(k) != snap.get(k) for k in (*repair_db.SNAPSHOT_COLUMNS, "ticket_fields")
+    ):
+        repair_db.update_snapshot(ticket_id, snap)  # CS corrected the ticket: keep the copy current
+        rma = repair_db.get_rma(ticket_id)
     history = repair_db.events_for(ticket_id) if rma else []
     stage_by = {}
     for e in reversed(history):  # who last posted each stage
@@ -279,10 +349,53 @@ def action_page(ticket_id):
         legacy_history=db.recent_actions(ticket_id),
         next_stage=_next_stage(rma["stage"]) if rma else None,
         current_index=repair_db.stage_index(rma["stage"]) if rma else -1,
+        rifle=_rifle(rma, snap),
+        tracking_url=tracking.tracking_url,
+        carrier_name=tracking.carrier_name,
+        status_words=tracking.STATUS_WORDS,
+        tracking_service=tracking.provider_ready(),
+        final_check_ok=_final_check_ok(rma) if rma else True,
     )
     return render_template("portal/action.html", **ctx)
 
 
+def _snapshot(ticket):
+    """Product data from the Zendesk ticket's fields, or None if they can't be read."""
+    if not db.available():
+        return None
+    try:
+        fields_map = _get_zendesk().get_ticket_fields()
+    except ZendeskError:
+        logger.warning("Could not read Zendesk ticket fields; product data not refreshed")
+        return None
+    return repair_settings.ticket_snapshot(ticket, fields_map, repair_settings.load())
+
+
+def _rifle(rma, snap):
+    """What we know about the rifle: verified on the bench, else from the ticket."""
+    src = rma or {}
+    zd = snap or {}
+
+    def pick(verified, role):
+        return src.get(verified) or src.get(f"zd_{role}") or zd.get(f"zd_{role}")
+
+    return {
+        "model": pick("model", "model"),
+        "caliber": pick("caliber", "caliber"),
+        "part_number": pick("part_number", "part_number"),
+        "serial": pick("serial_number", "serial"),
+        "ticket_serial": src.get("zd_serial") or zd.get("zd_serial"),
+        "inbound": src.get("inbound_tracking") or src.get("zd_inbound_tracking") or zd.get("zd_inbound_tracking"),
+        "ticket_inbound": src.get("zd_inbound_tracking") or zd.get("zd_inbound_tracking"),
+        "fields": src.get("ticket_fields") or zd.get("ticket_fields") or [],
+    }
+
+
+def _final_check_ok(rma):
+    """Passed the final safety/function check, and the accuracy test if one was needed."""
+    if rma.get("function_check") != "pass":
+        return False
+    return not (rma.get("test_required") and rma.get("test_result") != "pass")
 @portal_bp.route("/t/<int:ticket_id>/report")
 def repair_report(ticket_id):
     """Printable repair report: every stage form, cleaned up, one page to print or save as PDF.
@@ -315,6 +428,7 @@ def repair_report(ticket_id):
         stages=repair_db.list_stages(),
         stage_by=stage_by,
         issues=[p for p in (rma.get("inspection") or []) if p.get("result") == "issue"],
+        rifle=_rifle(rma, None),
         now=datetime.now(timezone.utc),
     )
 
@@ -367,14 +481,43 @@ def _base_values(rma):
         "arrival_note": "",
         "problem": rma.get("problem_summary") or "",
         "solution": rma.get("solution_summary") or "",
-        "work_done": rma.get("work_done") or rma.get("solution_summary") or "",
+        "work_done": (rma.get("work_done") or rma.get("solution_summary") or "").rstrip(". "),  # messages add their own period
         "inspection": _inspection_text(rma.get("inspection") or []),
         "points": str(len(rma.get("inspection") or [])),
         "group": group,
         "distance": str(rma.get("test_distance") or ""),
         "ammo": rma.get("test_ammo") or "",
         "tracking": rma.get("tracking_number") or "",
+        "tracking_url": tracking.tracking_url(rma.get("tracking_number"), rma.get("return_carrier")),
+        "carrier": tracking.carrier_name(rma.get("return_carrier")),
+        "tracking_link": _tracking_link(rma.get("tracking_number"), rma.get("return_carrier")),
+        "serial": rma.get("serial_number") or rma.get("zd_serial") or "",
+        "model": rma.get("model") or rma.get("zd_model") or "",
+        "caliber": rma.get("caliber") or rma.get("zd_caliber") or "",
     }
+
+
+def _tracking_link(number, carrier):
+    url = tracking.tracking_url(number, carrier)
+    return f"Track it here: {url}\n" if url else ""
+
+
+def _clean(form, name, limit=120):
+    return " ".join((form.get(name) or "").split())[:limit] or None
+
+
+def _read_number(form, name, low, high, label):
+    """An optional measurement: None if blank, a float in range, or an error string."""
+    raw = (form.get(name) or "").strip()
+    if not raw:
+        return None
+    try:
+        value = float(raw)
+    except ValueError:
+        return f"{label} must be a number."
+    if not low < value <= high:
+        return f"{label} looks wrong ({raw}). Enter it in pounds, e.g. 3.5."
+    return value
 
 
 RESULT_WORDS = {"ok": "OK", "issue": "Issue found", "na": "Not applicable"}
@@ -417,6 +560,29 @@ def _read_stage_form(key, form, rma):
         if isinstance(picked, str):
             return picked
         ids, other, summary, add = picked
+        clear = form.get("arrival_clear")
+        if clear not in ("clear", "loaded"):
+            return "Safety first: check the chamber and magazine, then answer whether it arrived unloaded."
+        serial = (_clean(form, "serial_number", 40) or "").upper().replace(" ", "")  # as stamped, scanner-style
+        if not serial or not SERIAL_RE.match(serial):
+            return "Scan or type the serial number from the rifle itself."
+        expected = rma.get("zd_serial")
+        serial_match = None
+        if expected:
+            serial_match = repair_db.normalize_code(serial) == repair_db.normalize_code(expected)
+            if not serial_match and form.get("serial_confirm") != "1":
+                return (f"The rifle's serial ({serial}) doesn't match the ticket ({expected}). Check it again; "
+                        "if it really is different, tick “Serial is different from the ticket”.")
+        inbound = _clean(form, "inbound_tracking", 64)
+        if inbound and not TRACKING_RE.match(inbound):
+            return "That inbound tracking number doesn't look right. Scan the label on the box."
+        inbound_match = None
+        if inbound and rma.get("zd_inbound_tracking"):
+            inbound_match = repair_db.normalize_code(inbound) == repair_db.normalize_code(rma["zd_inbound_tracking"])
+        model = _clean(form, "model")
+        caliber = _clean(form, "caliber", 60)
+        if not model or not caliber:
+            return "Confirm the model and caliber (as marked on the rifle)."
         damage = form.get("arrival_damage")
         if damage not in ("yes", "no"):
             return "Answer: any damage or shipping issues?"
@@ -428,7 +594,25 @@ def _read_stage_form(key, form, rma):
             "accessory_other": other,
             "arrival_damage": damage == "yes",
             "arrival_notes": notes,
+            "arrived_loaded": clear == "loaded",
+            "serial_number": serial,
+            "serial_match": serial_match,
+            "inbound_tracking": inbound,
+            "inbound_match": inbound_match,
+            "model": model,
+            "caliber": caliber,
+            "part_number": _clean(form, "part_number", 60),
         }
+        if clear == "loaded":
+            fields["flag"] = "Arrived loaded"
+        if serial_match is False:
+            # Never email the customer about a rifle that may not be theirs: CS checks first.
+            mode = "internal"
+            fields["flag"] = "Serial mismatch"
+            internal = (
+                f"Received, but the serial on the rifle ({serial}) does not match the ticket ({expected}). "
+                "Customer not emailed. CS: please confirm with the customer before work starts."
+            )
         values = {
             "accessories": summary or "none",
             "arrival_note": (
@@ -436,6 +620,9 @@ def _read_stage_form(key, form, rma):
                 if damage == "yes"
                 else ""
             ),
+            "serial": serial,
+            "model": model,
+            "caliber": caliber,
         }
     elif key == "inspected":
         points = _read_inspection(form)
@@ -448,12 +635,20 @@ def _read_stage_form(key, form, rma):
         if isinstance(picked, str):
             return picked
         ids, other, summary, add = picked
+        headspace = form.get("headspace")
+        if headspace not in ("pass", "fail", "not_checked"):
+            return "Answer the headspace check (Pass, Fail or Not checked)."
+        pull = _read_number(form, "trigger_pull_found", 0, 15, "Trigger pull (as found)")
+        if isinstance(pull, str):
+            return pull
         fields = {
             "picks": ("problem", ids, add),
             "problem_other": other,
             "problem_notes": (form.get("problem_notes") or "").strip() or None,
             "inspection": points,
             "complaint_match": match,
+            "headspace": headspace,
+            "trigger_pull_found": pull,
         }
         values = {"problem": summary, "inspection": _inspection_text(points), "points": str(len(points))}
     elif key == "repaired":
@@ -462,16 +657,48 @@ def _read_stage_form(key, form, rma):
             return picked
         ids, other, summary, add = picked
         work_done = (form.get("work_done") or "").strip()
-        fields = {"picks": ("solution", ids, add), "solution_other": other, "work_done": work_done or None}
-        values = {"solution": summary, "work_done": work_done or summary}
+        try:
+            cause_id = int(form.get("root_cause_id") or 0)
+        except ValueError:
+            cause_id = 0
+        if not repair_db.get_active_choices([cause_id], "root_cause"):
+            return "Pick the root cause (for warranty and quality tracking)."
+        coverage = form.get("coverage")
+        if coverage not in ("warranty", "customer_pay", "goodwill"):
+            return "Pick how the repair is covered: Warranty, Customer pay or Goodwill."
+        pull = _read_number(form, "trigger_pull_after", 0, 15, "Trigger pull (after repair)")
+        if isinstance(pull, str):
+            return pull
+        parts = " ".join((form.get("parts_used") or "").split())[:500] or None
+        fields = {
+            "picks": ("solution", ids, add), "solution_other": other, "work_done": work_done or None,
+            "root_cause_id": cause_id, "coverage": coverage, "parts_used": parts, "trigger_pull_after": pull,
+        }
+        values = {"solution": summary, "work_done": (work_done or summary).rstrip(". ")}
     elif key == "tested":
+        check = form.get("function_check")
+        if check not in ("pass", "fail"):
+            return "Answer the final safety and function check (Pass or Fail)."
         required = form.get("test_required")
         if required not in ("yes", "no"):
             return "Answer: is an accuracy test required for this rifle?"
+        if check == "fail":
+            cleared = {"function_check": "fail", "flag": "Failed final check"}
+            if required == "no":
+                cleared.update(test_required=False, test_result=None, group_size=None,
+                               group_unit=None, test_distance=None, test_ammo=None)
+            note = _clean(form, "function_notes", 300)
+            return cleared, {}, "internal", (
+                "Final safety / function check FAILED" + (f": {note}" if note else "")
+                + ". Back to the bench. Customer not emailed."
+            )
         if required == "no":
-            cleared = {"test_required": False, "test_result": None, "group_size": None,
-                       "group_unit": None, "test_distance": None, "test_ammo": None}
-            return cleared, {}, "internal", "Accuracy test: not required for this rifle. Customer not emailed."
+            cleared = {"function_check": "pass", "test_required": False, "test_result": None,
+                       "group_size": None, "group_unit": None, "test_distance": None, "test_ammo": None}
+            return cleared, {}, "internal", (
+                "Final safety / function check passed. Accuracy test: not required for this rifle. "
+                "Customer not emailed."
+            )
         result = form.get("test_result")
         if result not in ("pass", "fail"):
             return "Pick the test result: pass or fail."
@@ -494,6 +721,7 @@ def _read_stage_form(key, form, rma):
         size = f"{group:g}"
         group_text = f"{size} MOA" if unit == "moa" else f'{size}"'
         fields = {
+            "function_check": "pass",
             "test_required": True,
             "test_result": result,
             "group_size": group,
@@ -510,14 +738,39 @@ def _read_stage_form(key, form, rma):
                 "Customer not emailed."
             )
     elif key == "shipped":
-        if rma.get("test_required") and rma.get("test_result") == "fail" and form.get("ship_failed") != "1":
-            return ("This rifle failed its accuracy test. Re-test it, or tick "
-                    "“Ship anyway” if a manager approved shipping it as is.")
-        tracking = (form.get("tracking_number") or "").strip()
-        if not TRACKING_RE.match(tracking):
+        override = False
+        if not _final_check_ok(rma):
+            if form.get("ship_failed") != "1":
+                if rma.get("function_check") is None and not rma.get("tested_at"):
+                    why = "hasn't had its final safety / function check"
+                elif rma.get("function_check") == "fail":
+                    why = "failed its final safety / function check"
+                elif rma.get("test_result") == "fail":
+                    why = "failed its accuracy test"
+                else:
+                    why = "hasn't passed its final check"
+                return (f"This rifle {why}. Post “Final test” first, or tick "
+                        "“Ship anyway” if a manager approved shipping it as is.")
+            override = True
+        ship_serial = (_clean(form, "ship_serial", 40) or "").upper().replace(" ", "") or None
+        if not ship_serial:
+            return "Scan the serial number on the rifle going in the box."
+        expected = rma.get("serial_number") or rma.get("zd_serial")
+        if expected and repair_db.normalize_code(ship_serial) != repair_db.normalize_code(expected):
+            return (f"Wrong rifle? The serial you scanned ({ship_serial}) is not this ticket's rifle "
+                    f"({expected}). Nothing was sent.")
+        if form.get("ship_unloaded") != "1":
+            return "Confirm the rifle is unloaded and there is no ammunition in the box."
+        number = (form.get("tracking_number") or "").strip()
+        if not TRACKING_RE.match(number):
             return "Scan or type the return tracking number."
-        fields = {"tracking_number": tracking}
-        values = {"tracking": tracking}
+        carrier = form.get("return_carrier")
+        if carrier not in tracking.CARRIER_NAMES:
+            carrier = tracking.detect_carrier(number)
+        fields = {"tracking_number": number, "ship_serial": ship_serial, "return_carrier": carrier,
+                  "ship_override": override}
+        values = {"tracking": number, "tracking_url": tracking.tracking_url(number, carrier),
+                  "tracking_link": _tracking_link(number, carrier), "carrier": tracking.carrier_name(carrier)}
     return fields, values, mode, internal
 
 
@@ -714,8 +967,12 @@ def post_stage(ticket_id, key):
         )
     elif mode == "public":
         flash(f"Posted “{stage['label']}” on ticket #{ticket_id}. Zendesk will email the customer.", "success")
-    elif key == "tested" and fields.get("test_result") == "fail":
-        flash("Saved the failed test as an internal note. The customer was not emailed.", "success")
+    elif key == "tested" and (fields.get("test_result") == "fail" or fields.get("function_check") == "fail"):
+        flash("Saved the failed test as an internal note and flagged the rifle. The customer was not emailed.",
+              "success")
+    elif key == "received" and fields.get("serial_match") is False:
+        flash("Saved as an internal note and flagged “Serial mismatch”. The customer was not emailed; "
+              "let CS know so they can confirm with the customer.", "success")
     else:
         flash(f"Saved “{stage['label']}”. The customer was not emailed.", "success")
     return _back(ticket_id)
@@ -878,3 +1135,277 @@ def clear_flag(ticket_id):
     repair_db.set_flag(ticket_id, None)
     flash("Cleared the status flag.", "success")
     return _back(ticket_id)
+
+
+# ---------------------------------------------------------------- delivery
+
+
+@portal_bp.route("/t/<int:ticket_id>/delivery/check", methods=["POST"])
+def check_delivery(ticket_id):
+    """Ask the tracking service now (the background checker does this hourly)."""
+    if not db.available() or _need_tech() is None:
+        return _back(ticket_id)
+    rma = repair_db.get_rma(ticket_id)
+    if not rma or rma["stage"] != "shipped" or not rma.get("tracking_number"):
+        flash("This RMA hasn't shipped yet.", "error")
+        return _back(ticket_id)
+    if not tracking.provider_ready():
+        flash("No tracking service is set up, so delivery can't be checked automatically. "
+              "Open the tracking link, then use “Mark delivered”.", "error")
+        return _back(ticket_id)
+    try:
+        status = delivery.check_one(_get_zendesk(), rma, repair_settings.load())
+    except (tracking.TrackingError, ZendeskError) as exc:
+        flash(f"Couldn't check tracking: {exc}", "error")
+        return _back(ticket_id)
+    if status == "delivered":
+        flash("Delivered. The customer was emailed (if delivered emails are on in Settings).", "success")
+    else:
+        flash(f"Tracking says: {tracking.STATUS_WORDS.get(status, status)}.", "success")
+    return _back(ticket_id)
+
+
+def _delivered_body(ticket_id):
+    rma = repair_db.get_rma(ticket_id)
+    if not rma or rma["stage"] != "shipped":
+        raise _Stop("This RMA hasn't shipped yet.")
+    if rma.get("delivered_at"):
+        raise _Stop("This RMA is already marked delivered.")
+    return delivery.delivered_message(rma, None, repair_settings.load())
+
+
+@portal_bp.route("/t/<int:ticket_id>/delivery/preview", methods=["POST"])
+def preview_delivered(ticket_id):
+    blocked = _preview_guard()
+    if blocked:
+        return blocked
+    try:
+        body = _delivered_body(ticket_id)
+    except _Stop as exc:
+        return {"ok": False, "error": str(exc)}
+    if request.form.get("email") != "1":
+        return {"ok": True, "title": "Delivered", "posts": [],
+                "summary": "Saved to the repair record only. The customer is not emailed."}
+    return {"ok": True, "title": "Delivered", "posts": [{"public": True, "body": body, "files": []}]}
+
+
+@portal_bp.route("/t/<int:ticket_id>/delivery/mark", methods=["POST"])
+def mark_delivered(ticket_id):
+    """A tech confirms delivery by hand (no tracking service, or it's behind)."""
+    if not db.available():
+        return _back(ticket_id)
+    tech = _need_tech()
+    if tech is None:
+        return redirect(url_for("portal.tech_signin", next=url_for("portal.action_page", ticket_id=ticket_id)))
+    try:
+        _delivered_body(ticket_id)
+        outcome = delivery.mark_delivered(
+            _get_zendesk(), ticket_id, tech=tech, how="manual", email=request.form.get("email") == "1",
+            detail="Marked delivered by " + tech["name"],
+        )
+    except _Stop as exc:
+        flash(str(exc), "error")
+        return _back(ticket_id)
+    except ZendeskError as exc:
+        flash(f"Zendesk rejected the update, so nothing was sent or saved: {exc}", "error")
+        return _back(ticket_id)
+    flash({
+        "emailed": "Marked delivered. Zendesk will email the customer.",
+        "recorded": "Marked delivered. The customer was not emailed.",
+        "already": "It was already marked delivered.",
+        "not_shipped": "This RMA hasn't shipped yet.",
+    }[outcome], "success" if outcome in ("emailed", "recorded") else "error")
+    return _back(ticket_id)
+
+
+@portal_bp.route("/deliveries/check", methods=["POST"])
+def check_all_deliveries():
+    if not db.available() or _need_tech() is None:
+        return redirect(url_for("portal.queue"))
+    if not tracking.provider_ready():
+        flash("No tracking service is set up (TRACKING_PROVIDER).", "error")
+        return redirect(url_for("portal.queue"))
+    counts = delivery.check_all(_get_zendesk(), recheck_minutes=0)
+    if not counts:
+        flash("No shipments waiting on delivery.", "success")
+    else:
+        parts = [f"{n} {tracking.STATUS_WORDS.get(k, k).lower()}" for k, n in sorted(counts.items())]
+        flash("Checked tracking: " + ", ".join(parts) + ".", "success")
+    return redirect(url_for("portal.queue"))
+
+
+# ---------------------------------------------------------------- final reports
+
+
+COVERAGE_WORDS = {"warranty": "Warranty", "customer_pay": "Customer pay", "goodwill": "Goodwill"}
+
+
+def _report_values(rma, ticket_id):
+    """Placeholders for the final repair report (customer-facing: no internal notes)."""
+    base = _base_values(rma)
+
+    def day(ts):
+        return ts.astimezone(ZoneInfo(repair_db.REPORT_TZ)).strftime("%B %d, %Y") if ts else "not yet"
+
+    if rma.get("arrival_damage"):
+        arrival = f"Noted on arrival: {rma.get('arrival_notes') or 'damage'}"
+    elif rma.get("received_at"):
+        arrival = "No damage noted"
+    else:
+        arrival = "not recorded"
+    if not rma.get("tested_at"):
+        test = "Not yet tested."
+    else:
+        check = {"pass": "passed", "fail": "FAILED"}.get(rma.get("function_check"), "not recorded")
+        test = f"Safety and function check: {check}."
+        if rma.get("test_required") is False:
+            test += " Accuracy test: not required for this repair."
+        elif rma.get("test_result"):
+            test += (f" Accuracy test: {'passed' if rma['test_result'] == 'pass' else 'did not pass'}, "
+                     f"{base['group']} group at {base['distance']} yards with {base['ammo']}.")
+    return {
+        **base,
+        "ticket_id": str(ticket_id),
+        "model": base["model"] or "rifle",
+        "serial": base["serial"] or "not recorded",
+        "received_date": day(rma.get("received_at")),
+        "shipped_date": day(rma.get("shipped_at")),
+        "arrival": arrival,
+        "inspection": base["inspection"] or "(inspection not recorded)",
+        "problem": base["problem"] or "not recorded",
+        "work_done": base["work_done"] or "not recorded",
+        "parts_line": f"Parts replaced: {rma['parts_used']}\n" if rma.get("parts_used") else "",
+        "test": test,
+        "tracking": base["tracking"] or "(not shipped yet)",
+        "tracking_url": base["tracking_url"],
+    }
+
+
+def _report_draft(rma, saved):
+    """The report text: the saved edit if there is one, else built from the record."""
+    if saved and saved.get("body"):
+        return saved["body"]
+    template = repair_settings.load()["final_report_template"]
+    text = render_message(template, _report_values(rma, rma["ticket_id"]))
+    return re.sub(r"\n{3,}", "\n\n", text).strip()
+
+
+@portal_bp.route("/final-reports")
+def final_reports():
+    if not db.available():
+        return render_template("portal/final_reports.html", queue=None), 503
+    return render_template("portal/final_reports.html", queue=repair_db.final_report_queue())
+
+
+@portal_bp.route("/t/<int:ticket_id>/final-report")
+def final_report(ticket_id):
+    if not db.available():
+        return render_template("error.html", ticket_id=ticket_id, message="Database not configured."), 503
+    rma = repair_db.get_rma(ticket_id)
+    if not rma:
+        flash(f"Ticket #{ticket_id} isn't in the repair queue.", "error")
+        return _back(ticket_id)
+    try:
+        ticket, requester, _org = _get_zendesk().get_ticket(ticket_id)
+    except ZendeskError as exc:
+        return render_template("error.html", ticket_id=ticket_id, message=str(exc)), 502
+    saved = repair_db.get_final_report(ticket_id)
+    return render_template(
+        "portal/final_report.html",
+        ticket=ticket, requester=requester, rma=rma, saved=saved,
+        body=_report_draft(rma, saved),
+        closed=ticket.get("status") == "closed",
+        ready=rma["stage"] == "shipped",
+        tech=auth.current_tech(),
+        coverage_words=COVERAGE_WORDS,
+    )
+
+
+def _report_body(form):
+    body = (form.get("body") or "").replace("\r\n", "\n").strip()
+    if len(body) < 20:
+        raise _Stop("The report is empty. Rebuild it from the repair record or write it first.")
+    if len(body) > 20000:
+        raise _Stop("The report is too long for one Zendesk comment.")
+    return body
+
+
+@portal_bp.route("/t/<int:ticket_id>/final-report/save", methods=["POST"])
+def save_final_report(ticket_id):
+    if not db.available():
+        return _back(ticket_id)
+    tech = _need_tech()
+    if tech is None:
+        return redirect(url_for("portal.tech_signin", next=url_for("portal.final_report", ticket_id=ticket_id)))
+    if not repair_db.get_rma(ticket_id):
+        return _back(ticket_id)
+    here = redirect(url_for("portal.final_report", ticket_id=ticket_id))
+    if request.form.get("op") == "rebuild":
+        repair_db.save_final_report(ticket_id, None, tech)
+        flash("Rebuilt the report from the repair record (your edits were discarded).", "success")
+        return here
+    if request.form.get("op") == "reopen":
+        repair_db.reopen_final_report(ticket_id)
+        flash("You can edit and send a corrected report.", "success")
+        return here
+    try:
+        repair_db.save_final_report(ticket_id, _report_body(request.form), tech)
+    except _Stop as exc:
+        flash(str(exc), "error")
+        return here
+    flash("Draft saved. Nothing was sent.", "success")
+    return here
+
+
+@portal_bp.route("/t/<int:ticket_id>/final-report/preview", methods=["POST"])
+def preview_final_report(ticket_id):
+    blocked = _preview_guard()
+    if blocked:
+        return blocked
+    try:
+        body = _report_body(request.form)
+        saved = repair_db.get_final_report(ticket_id)
+        if saved and saved.get("sent_at"):
+            raise _Stop("This report was already sent. Use “Send a corrected report” first.")
+    except _Stop as exc:
+        return {"ok": False, "error": str(exc)}
+    return {"ok": True, "title": "Final repair report", "posts": [{"public": True, "body": body, "files": []}]}
+
+
+@portal_bp.route("/t/<int:ticket_id>/final-report/send", methods=["POST"])
+def send_final_report(ticket_id):
+    if not db.available():
+        return _back(ticket_id)
+    tech = _need_tech()
+    if tech is None:
+        return redirect(url_for("portal.tech_signin", next=url_for("portal.final_report", ticket_id=ticket_id)))
+    here = redirect(url_for("portal.final_report", ticket_id=ticket_id))
+    if not repair_db.get_rma(ticket_id):
+        return _back(ticket_id)
+    try:
+        body = _report_body(request.form)
+    except _Stop as exc:
+        flash(str(exc), "error")
+        return here
+    posted = False
+    try:
+        with repair_db.ticket_lock(ticket_id) as conn:
+            if repair_db.report_sent(conn, ticket_id):
+                flash("This report was already sent. Not sent again.", "error")
+                return here
+            repair_db.save_final_report(ticket_id, body, tech)  # keep the text even if Zendesk refuses it
+            try:
+                _get_zendesk().post_update(ticket_id, body, public=True, tags=[portal_tag(), "rp-final-report"])
+            except ZendeskError as exc:
+                flash(f"Zendesk rejected the report, so it was not sent (your edits are saved): {exc}", "error")
+                return here
+            posted = True
+            repair_db.record_report_sent(conn, ticket_id, body, tech)
+    except Exception:
+        if not posted:
+            raise
+        logger.exception("Final report posted to Zendesk but not saved for ticket %s", ticket_id)
+        flash("The report was posted to Zendesk, but saving that failed. Tell IT; do not send it again.", "error")
+        return here
+    flash(f"Sent the final repair report on ticket #{ticket_id}. Zendesk will email the customer.", "success")
+    return redirect(url_for("portal.final_reports"))

@@ -11,3 +11,14 @@ services:
       timeout: 10s
       retries: 3
       start_period: 10s
+
+  # Checks return-shipment tracking every 30 minutes and emails the customer
+  # (a public Zendesk comment) once the carrier shows the rifle delivered.
+  # Needs TRACKING_PROVIDER + its API key in .env; without them it idles.
+  delivery-checker:
+    build: .
+    entrypoint: ["python", "delivery.py", "--loop", "1800"]
+    env_file: .env
+    restart: unless-stopped
+    depends_on:
+      - zendesk-ticket-print

@@ -1,15 +1,55 @@
 {% extends "portal/base.html" %}
-{% block title %}Scan a ticket{% endblock %}
+{% block title %}Scan{% endblock %}
 {% block content %}
 <div class="scan-card">
-  <h1>Scan a ticket</h1>
-  <p class="tagline">Scan the barcode on the one-pager, or type the ticket number.</p>
+  <h1>Scan</h1>
+  <p class="tagline">Scan the barcode on the one-pager, the rifle's serial number, or the tracking label on the box.
+    You can also type a ticket number.</p>
   {% if error %}<div class="notice warn">{{ error }}</div>{% endif %}
   <form action="{{ url_for('portal.scan_go') }}" method="get" class="lookup-form">
-    <input type="text" name="ticket_id" placeholder="Ticket ID" autofocus autocomplete="off"
-           inputmode="numeric" required>
+    <input type="text" name="ticket_id" placeholder="Scan or type" autofocus autocomplete="off"
+           autocapitalize="characters" spellcheck="false" required value="{{ code or '' }}">
     <button type="submit">Open</button>
   </form>
-  <p class="hint">Handheld scanners press Enter automatically after a scan — just scan and go.</p>
+  <p class="hint">Handheld scanners press Enter after a scan, so just scan and go.</p>
 </div>
+
+{% if rmas %}
+<section class="panel scan-results">
+  <h2>{{ rmas|length }} RMAs match “{{ code }}”</h2>
+  <table class="report-table">
+    <thead><tr><th>Ticket</th><th>Rifle</th><th>Customer</th><th>Stage</th><th>Added</th></tr></thead>
+    <tbody>
+    {% for r in rmas %}
+      <tr>
+        <td><a href="{{ url_for('portal.action_page', ticket_id=r.ticket_id) }}">#{{ r.ticket_id }}</a></td>
+        <td>{{ r.model or r.zd_model or '' }} <span class="mono subtle">{{ r.serial_number or r.zd_serial or '' }}</span></td>
+        <td>{{ r.requester_name or '' }}</td>
+        <td>{{ r.stage|capitalize }}</td>
+        <td>{{ r.added_at|localtime('%b %d, %Y') }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  <p class="hint">The same rifle can come back more than once: pick the open one.</p>
+</section>
+{% elif tickets %}
+<section class="panel scan-results">
+  <h2>Zendesk tickets mentioning “{{ code }}”</h2>
+  <p class="tagline">Not in the repair queue yet. Open the right ticket and add it.</p>
+  <table class="report-table">
+    <thead><tr><th>Ticket</th><th>Subject</th><th>Status</th><th>Opened</th></tr></thead>
+    <tbody>
+    {% for t in tickets %}
+      <tr>
+        <td><a href="{{ url_for('portal.action_page', ticket_id=t.id) }}">#{{ t.id }}</a></td>
+        <td>{{ t.subject or '(no subject)' }}</td>
+        <td><span class="badge status-{{ t.status }}">{{ (t.status or '?')|capitalize }}</span></td>
+        <td>{{ t.created_at|datefmt }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endif %}
 {% endblock %}

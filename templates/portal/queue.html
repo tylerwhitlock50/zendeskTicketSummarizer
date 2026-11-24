@@ -4,7 +4,14 @@
 {% block content %}
 <div class="page-head">
   <h1>Repair queue</h1>
-  <a href="{{ url_for('portal.incoming') }}" class="secondary-btn">Incoming from Zendesk</a>
+  <span class="head-actions">
+    {% if tracking_service and current_tech() %}
+    <form method="post" action="{{ url_for('portal.check_all_deliveries') }}" class="inline-form">
+      {{ csrf_field() }}<button type="submit" class="secondary-btn">Check deliveries now</button>
+    </form>
+    {% endif %}
+    <a href="{{ url_for('portal.incoming') }}" class="secondary-btn">Incoming from Zendesk</a>
+  </span>
 </div>
 {% if columns is none %}
 <div class="notice warn">Database not configured. Set <code>DATABASE_URL</code> and run migrations.</div>
@@ -22,7 +29,16 @@
       <span class="card-id">#{{ r.ticket_id }}</span>
       <span class="card-subject">{{ r.subject or '(no subject)' }}</span>
       <span class="card-meta">{{ r.requester_name or '' }}</span>
+      {% set model = r.model or r.zd_model %}{% set serial = r.serial_number or r.zd_serial %}
+      {% if model or serial %}<span class="card-meta card-rifle">{{ model or '' }}{% if serial %} <span class="mono">{{ serial }}</span>{% endif %}</span>{% endif %}
       {% if r.flag %}<span class="flag-pill small">{{ r.flag }}</span>{% endif %}
+      {% if key == 'shipped' %}
+      <span class="card-meta">
+        {% if r.delivered_at %}<span class="ok-tag">delivered {{ r.delivered_at|localtime('%b %d') }}</span>
+        {% else %}<span class="transit-tag">{{ status_words.get(r.delivery_status, 'In transit') if r.delivery_status else 'Shipped' }}</span>{% endif %}
+        {% if not r.report_sent_at %}<span class="flag-pill small">report to send</span>{% endif %}
+      </span>
+      {% endif %}
       <span class="card-meta">{% if key == 'shipped' %}shipped{% else %}since{% endif %} {{ r.stage_since|localtime('%b %d') }}
         {% if r.problem_summary and key in ('inspected', 'repaired', 'tested') %} &middot; {{ r.problem_summary }}{% endif %}</span>
     </a>
