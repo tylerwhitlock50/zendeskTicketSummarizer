@@ -199,6 +199,7 @@ class PasswordGate:
 
 if os.environ.get("DEMO_PASSWORD"):
     app_module.app.wsgi_app = PasswordGate(app_module.app.wsgi_app, os.environ["DEMO_PASSWORD"])
+    print("Password gate is on: visitors are asked for DEMO_PASSWORD (any user name).", flush=True)
 
 if os.environ.get("DEMO_BEHIND_PROXY") == "1":
     # Behind Caddy (HTTPS): take the visitor's address and https scheme from the
@@ -210,7 +211,7 @@ if os.environ.get("DEMO_BEHIND_PROXY") == "1":
     app_module.app.wsgi_app = ProxyFix(app_module.app.wsgi_app, x_for=1, x_proto=1, x_host=1)
     app_module.app.config["SESSION_COOKIE_SECURE"] = True
     app_module.app.config["PREFERRED_URL_SCHEME"] = "https"
-    print("Password gate is on: visitors are asked for DEMO_PASSWORD (any user name).", flush=True)
+    print("Behind the HTTPS proxy: trusting its X-Forwarded-For/Proto; cookies are HTTPS-only.", flush=True)
 
 if __name__ == "__main__":
     app_module.app.run(
