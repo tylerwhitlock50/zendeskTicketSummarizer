@@ -154,7 +154,7 @@ def customer_submit(token):
         return _form(row, answers, errors, status=422)
 
     here = redirect(url_for("intake.customer_form", token=token), code=303)
-    if not intake.save_submission(row["id"], answers, uploads):
+    if not intake.save_submission(row["id"], answers, uploads, token_hash=row["token_hash"]):
         return here  # sent twice, or the link ran out meanwhile: the GET shows which
     logger.info("RI-%s: intake form saved for ticket %s (%s files)", row["id"], row["ticket_id"], len(uploads))
     # One try at Zendesk now. The answers are saved either way, and the sweep or

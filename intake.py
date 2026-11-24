@@ -64,6 +64,7 @@ CONCERNS_LABEL = "Concerns"
 
 _OPEN = ("pending_link", "link_sent")
 _ANSWERED = ("submitted", "synced", "sync_failed")
+_LINKABLE = "('pending_link', 'link_sent', 'expired')"  # SQL: rows a link can still be sent for
 # Zendesk failures worth another automatic try: 5 min, 10, 20 ... capped at 6 h.
 _BACKOFF = "now() + least(interval '5 minutes' * power(2, attempts), interval '6 hours')"
 
@@ -199,14 +200,17 @@ def _post_link(zendesk, ticket_id: int, requester, raw: str, message_key: str) -
     zendesk.post_update(ticket_id, body, public=True, tags=[_portal_tag(), SENT_TAG])
 
 
-def _link_ok(conn, intake_id: int, ticket_id: int, tech, label: str) -> None:
-    conn.execute(
+def _link_ok(conn, intake_id: int, ticket_id: int, tech, label: str) -> bool:
+    """Mark the link as sent. False (and no event) if the customer answered in the meantime."""
+    done = conn.execute(
         "UPDATE repair.intake SET status = 'link_sent', link_sent_at = now(), "
         "link_send_count = link_send_count + 1, attempts = 0, next_attempt_at = NULL, last_error = NULL, "
-        "updated_at = now() WHERE id = %s",
+        f"updated_at = now() WHERE id = %s AND status IN {_LINKABLE}",
         (intake_id,),
-    )
-    _event(conn, ticket_id, label, tech or _PORTAL)
+    ).rowcount
+    if done:
+        _event(conn, ticket_id, label, tech or _PORTAL)
+    return bool(done)
 
 
 def _link_failed(conn, intake_id: int, exc: ZendeskError, auto_retry: bool) -> None:
@@ -214,7 +218,7 @@ def _link_failed(conn, intake_id: int, exc: ZendeskError, auto_retry: bool) -> N
     conn.execute(
         "UPDATE repair.intake SET status = 'pending_link', last_error = %s, attempts = attempts + 1, "
         f"next_attempt_at = CASE WHEN %s AND attempts + 1 < %s THEN {_BACKOFF} END, updated_at = now() "
-        "WHERE id = %s",
+        f"WHERE id = %s AND status IN {_LINKABLE}",
         (str(exc)[:500], auto_retry and _retryable(exc), MAX_ATTEMPTS, intake_id),
     )
 
@@ -267,7 +271,9 @@ def resend_link(zendesk, ticket: dict[str, Any], requester, tech=None, manual: b
     ticket_id = ticket["id"]
     with repair_db.ticket_lock(ticket_id) as conn:
         row = conn.execute(
-            "SELECT id, status, link_send_count FROM repair.intake WHERE ticket_id = %s FOR UPDATE",
+            # No row lock: the ticket lock already keeps resends apart, and the
+            # new hash below is saved through a second connection.
+            "SELECT id, status, link_send_count FROM repair.intake WHERE ticket_id = %s",
             (ticket_id,),
         ).fetchone()
         if row and row["status"] in _ANSWERED:
@@ -305,13 +311,26 @@ def resend_link(zendesk, ticket: dict[str, Any], requester, tech=None, manual: b
                 (ticket_id, hashed, LINK_DAYS, (tech or {}).get("name")),
             ).fetchone()
 
-        def store_new_token():
-            if rotate:
-                conn.execute(
-                    "UPDATE repair.intake SET token_hash = %s, expires_at = now() + make_interval(days => %s), "
-                    "updated_at = now() WHERE id = %s",
-                    (hashed, LINK_DAYS, row["id"]),
-                )
+        def store_new_token(on, stop_retry=False):
+            # stop_retry: once staff replace the hash, the tag on the ticket no
+            # longer vouches for it, so the sweep must not "recover" this row.
+            return on.execute(
+                "UPDATE repair.intake SET token_hash = %s, expires_at = now() + make_interval(days => %s), "
+                "next_attempt_at = CASE WHEN %s THEN NULL ELSE next_attempt_at END, "
+                f"updated_at = now() WHERE id = %s AND status IN {_LINKABLE}",
+                (hashed, LINK_DAYS, stop_retry, row["id"]),
+            ).rowcount
+
+        # A link the customer already holds is replaced only once the new one
+        # is posted. Any other row has no working link to protect, so its new
+        # hash is saved (and committed) BEFORE the post: if this process dies
+        # after Zendesk took the comment, the stored hash is the emailed one
+        # and the sweep's "tag is on the ticket" recovery is right.
+        replace_after = rotate and had_link
+        if rotate and not had_link:
+            with _conn() as saved:
+                if not store_new_token(saved, stop_retry=manual):
+                    return "submitted"  # the customer answered a moment ago: nothing to send
 
         # "The earlier one no longer works" only makes sense if there was one.
         again = row["link_send_count"] > 0
@@ -324,24 +343,29 @@ def resend_link(zendesk, ticket: dict[str, Any], requester, tech=None, manual: b
                 # Zendesk answered and refused, so no new email exists: the
                 # link the customer already has must keep working.
                 conn.execute(
-                    "UPDATE repair.intake SET last_error = %s, updated_at = now() WHERE id = %s",
+                    "UPDATE repair.intake SET last_error = %s, updated_at = now() "
+                    f"WHERE id = %s AND status IN {_LINKABLE}",
                     (str(exc)[:500], row["id"]),
                 )
                 return "failed"
-            store_new_token()
+            if replace_after:
+                store_new_token(conn)
             # After a staff send the tag can no longer tell a landed post from a
             # failed one, so only the sweep's own sends are retried automatically.
             _link_failed(conn, row["id"], exc, auto_retry=not manual)
             return "failed"
-        store_new_token()
-        _link_ok(conn, row["id"], ticket_id, tech,
-                 "New intake form link sent" if again else "Intake form link sent")
+        if replace_after:
+            store_new_token(conn)
+        if not _link_ok(conn, row["id"], ticket_id, tech,
+                        "New intake form link sent" if again else "Intake form link sent"):
+            return "submitted"  # answered while the link was being posted; their answers stand
     return "sent"
 
 
 def _stop_link_retry(conn, intake_id: int, why: str) -> None:
     conn.execute(
-        "UPDATE repair.intake SET next_attempt_at = NULL, last_error = %s, updated_at = now() WHERE id = %s",
+        "UPDATE repair.intake SET next_attempt_at = NULL, last_error = %s, updated_at = now() "
+        f"WHERE id = %s AND status IN {_LINKABLE}",
         (why, intake_id),
     )
 
@@ -484,16 +508,22 @@ def _convert_heic(upload: files.Upload) -> files.Upload:
     return files._maybe_convert(upload, "heic")
 
 
-def save_submission(intake_id: int, answers: dict[str, str], uploads: list[files.Upload]) -> bool:
-    """Store the answers and photo bytes. False if the form was already sent or the link ran out."""
+def save_submission(intake_id: int, answers: dict[str, str], uploads: list[files.Upload],
+                    token_hash: Optional[str] = None) -> bool:
+    """Store the answers and photo bytes. False if the form was already sent, the
+    link ran out, or the link was replaced while the form was being sent.
+
+    ``token_hash`` is the hash of the link the post came in on. Checking it in
+    the same UPDATE means a link staff replaced mid-upload cannot be used.
+    """
     with _conn() as conn:
         with conn.transaction():
             row = conn.execute(
                 "UPDATE repair.intake SET status = 'submitted', answers = %s, submitted_at = now(), "
                 "attempts = 0, next_attempt_at = now(), last_error = NULL, updated_at = now() "
                 "WHERE id = %s AND status IN ('pending_link', 'link_sent') AND expires_at > now() "
-                "RETURNING id",
-                (Jsonb({**answers, "photo_count": len(uploads)}), intake_id),
+                "AND (%s::text IS NULL OR token_hash = %s) RETURNING id",
+                (Jsonb({**answers, "photo_count": len(uploads)}), intake_id, token_hash, token_hash),
             ).fetchone()
             if row is None:
                 return False

@@ -2679,3 +2679,104 @@ def test_public_only_mode_serves_nothing_but_the_form(client, zd, tech, intake_o
 
     monkeypatch.delenv("PORTAL_PUBLIC_ONLY")
     assert client.get("/queue").status_code == 200
+
+
+@needs_db
+def test_replaced_link_cannot_submit_even_mid_upload(client, zd, tech, intake_on, public):
+    """The post was accepted on the old link, then staff replaced it before the answers were saved."""
+    old_url = _linked(client, zd)
+    row = intake.find_by_token(old_url.rsplit("/", 1)[1])  # what guard_request resolved before the upload
+    client.post("/t/500/intake/send")                      # staff send a new link meanwhile
+    assert intake.save_submission(row["id"], dict(ANSWERS), [], token_hash=row["token_hash"]) is False
+    now = intake.for_ticket(500)
+    assert now["status"] == "link_sent" and not now["answers"]
+    new_url = "/repair/intake/" + _link_token(zd)
+    assert new_url != old_url and _submit(public, new_url).status_code == 303
+    assert intake.for_ticket(500)["status"] == "synced"
+
+
+@needs_db
+def test_link_retry_saves_its_hash_before_posting(client, zd, tech, intake_on, public, monkeypatch):
+    """If the worker dies after Zendesk took the retried link, the stored hash must be the emailed one."""
+    zd.fail, zd.fail_status = True, 503
+    _add(client)
+    zd.fail = False
+    assert intake.for_ticket(500)["status"] == "pending_link"
+    _sql("UPDATE repair.intake SET next_attempt_at = now() - interval '1 minute'")
+
+    posted = {}
+    real_post = zd.post_update
+
+    def post_then_die(ticket_id, body, **kw):
+        real_post(ticket_id, body, **kw)  # Zendesk has the comment and the tag...
+        posted["token"] = re.search(r"/repair/intake/([A-Za-z0-9_-]{43})", body).group(1)
+        raise KeyboardInterrupt  # ...and the process is killed before it can record that
+
+    monkeypatch.setattr(zd, "post_update", post_then_die)
+    ticket, requester, _org = zd.get_ticket(500)
+    with pytest.raises(KeyboardInterrupt):
+        intake.resend_link(zd, ticket, requester)
+    monkeypatch.undo()
+    monkeypatch.setenv("REPAIR_INTAKE_ENABLED", "1")
+    monkeypatch.setenv("REPAIR_INTAKE_BASE_URL", "https://repairs.example.com")
+
+    row = intake.for_ticket(500)
+    assert row["status"] == "pending_link" and row["token_hash"] == intake.hash_token(posted["token"])
+    _sql("UPDATE repair.intake SET next_attempt_at = now() - interval '1 minute'")
+    sent = len(zd.updates)
+    assert intake.sweep(zd).get("links") == 1 and len(zd.updates) == sent  # recovered, no second email
+    assert intake.for_ticket(500)["status"] == "link_sent"
+    assert public.get("/repair/intake/" + posted["token"]).status_code == 200  # the emailed link works
+
+
+@needs_db
+def test_staff_resend_that_dies_does_not_bless_an_unsent_link(client, zd, tech, intake_on, public, monkeypatch):
+    """First link landed (response lost). A staff resend dies before posting. The sweep must not
+    then mark the never-emailed replacement as sent."""
+    real_post = zd.post_update
+
+    def lands_but_times_out(ticket_id, body, **kw):
+        real_post(ticket_id, body, **kw)
+        raise ZendeskError("timed out")
+
+    monkeypatch.setattr(zd, "post_update", lands_but_times_out)
+    _add(client)
+    assert intake.for_ticket(500)["status"] == "pending_link" and "repair_intake_sent" in zd.tags
+
+    def dies(*_a, **_kw):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(zd, "post_update", dies)
+    ticket, requester, _org = zd.get_ticket(500)
+    with pytest.raises(KeyboardInterrupt):
+        intake.resend_link(zd, ticket, requester, tech, manual=True)
+    monkeypatch.setattr(zd, "post_update", real_post)
+
+    row = intake.for_ticket(500)
+    assert row["status"] == "pending_link" and row["next_attempt_at"] is None
+    assert intake.sweep(zd, force=True).get("links") is None
+    assert intake.for_ticket(500)["status"] == "pending_link"  # still shown to staff as not sent
+    assert any(r["ticket_id"] == 500 for r in intake.needs_attention()) or row["last_error"] is None
+
+
+@needs_db
+def test_resend_while_the_customer_submits_keeps_their_answers(client, zd, tech, intake_on, public, monkeypatch):
+    url = _linked(client, zd)
+    row = intake.find_by_token(url.rsplit("/", 1)[1])
+    real_post = zd.post_update
+    state = {"done": False}
+
+    def customer_submits_first(ticket_id, body, **kw):
+        if not state["done"]:
+            state["done"] = True
+            assert intake.save_submission(row["id"], dict(ANSWERS), [], token_hash=row["token_hash"])
+        return real_post(ticket_id, body, **kw)
+
+    monkeypatch.setattr(zd, "post_update", customer_submits_first)
+    ticket, requester, _org = zd.get_ticket(500)
+    assert intake.resend_link(zd, ticket, requester, tech, manual=True) == "submitted"
+    now = intake.for_ticket(500)
+    assert now["status"] == "submitted" and now["answers"]["serial"] == "CA12345"
+    assert now["token_hash"] == row["token_hash"]
+    labels = [e["label"] for e in repair_db.events_for(500)]
+    assert "New intake form link sent" not in labels
