@@ -516,6 +516,14 @@ def test_report_and_csv(client, zd, tech):
 
     resp = client.get("/report/")
     assert resp.status_code == 200 and b"Trigger" in resp.data
+    assert b'id="report-data"' in resp.data and b"chart-activity" in resp.data
+
+    charts = repair_db.report_charts(today, today)
+    assert charts["days"] == [today.isoformat()]
+    assert charts["daily"]["added"] == [1] and charts["daily"]["shipped"] == [1]
+    assert sum(charts["spread"]["shop"]) == 1 and sum(charts["spread"]["total"]) == 1
+    assert all(sum(v) == 0 for v in charts["aging"].values())  # it shipped, so nothing is open
+    assert charts["previous"]["counts"] == {}
 
     resp = client.get(f"/report/rmas.csv?start={today}&end={today}")
     text = resp.data.decode("utf-8-sig")
