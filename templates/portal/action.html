@@ -53,6 +53,7 @@
   </p>
   <p class="meta">
     <a href="{{ url_for('ticket_sheet', ticket_id=ticket.id) }}">Print sheet</a> &middot;
+    {% if rma %}<a href="{{ url_for('portal.repair_report', ticket_id=ticket.id) }}">Repair report (PDF)</a> &middot;{% endif %}
     <a href="{{ agent_url }}" target="_blank" rel="noopener">Open in Zendesk</a>
   </p>
   {% if complaint %}
@@ -273,7 +274,8 @@
 
   {% if rma %}
   <section class="panel">
-    <h2>Repair record</h2>
+    <h2>Repair record
+      <a class="link-btn small right" href="{{ url_for('portal.repair_report', ticket_id=ticket.id) }}">Print repair report</a></h2>
     <dl class="record">
       <dt>Added</dt><dd>{{ rma.added_at|localtime }} by {{ rma.added_by or '—' }}</dd>
       {% if rma.received_at %}<dt>Received with</dt><dd>{{ rma.accessory_summary or 'nothing listed' }}</dd>

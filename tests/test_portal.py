@@ -362,6 +362,26 @@ def test_shipped_requires_tracking(client, zd, tech):
 
 
 @needs_db
+def test_repair_report_shows_forms_but_not_internal_notes(client, zd, tech):
+    assert client.get("/t/500/report").status_code == 302  # not in the queue yet
+    _add(client)
+    client.post("/t/500/stage/received", data=RECEIVED)
+    trigger = _choice("problem", "Trigger")
+    client.post(
+        "/t/500/stage/inspected",
+        data={**inspected(), "problem_ids": [trigger["id"]], "problem_notes": "Sear worn, internal note"},
+    )
+    client.post("/t/500/stage/shipped", data={"tracking_number": "1Z999AA10123456784"})
+    resp = client.get("/t/500/report")
+    assert resp.status_code == 200
+    page = resp.get_data(as_text=True)
+    assert "Repair service report" in page and "Ticket" in page
+    assert "Trigger" in page and "1Z999AA10123456784" in page
+    assert "Sear worn" not in page
+    assert "/t/500/report" in client.get("/t/500").get_data(as_text=True)
+
+
+@needs_db
 def test_double_tap_does_not_email_twice(client, zd, tech):
     _add(client)
     client.post("/t/500/stage/received", data=RECEIVED)
