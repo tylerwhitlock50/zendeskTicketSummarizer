@@ -41,19 +41,33 @@ def _parse(raw):
 @report_bp.route("/")
 def weekly():
     start, end = _date_range()
+    span = timedelta(days=(end - start).days + 1)
+    today = _today()
+    presets = [
+        ("Last 7 days", today - timedelta(days=6), today),
+        ("Last 30 days", today - timedelta(days=29), today),
+        ("Last 90 days", today - timedelta(days=89), today),
+        ("Year to date", date(today.year, 1, 1), today),
+    ]
+    nav = dict(
+        start=start,
+        end=end,
+        presets=presets,
+        prev_start=start - span,
+        prev_end=end - span,
+        next_start=start + span,
+        next_end=end + span,
+    )
     if not db.available():
-        return render_template("portal/report.html", data=None, start=start, end=end), 503
+        return render_template("portal/report.html", data=None, charts=None, **nav), 503
+    stages = {s["key"]: s["label"] for s in repair_db.list_stages()}
     return render_template(
         "portal/report.html",
         data=repair_db.report(start, end),
-        stages={s["key"]: s["label"] for s in repair_db.list_stages()},
+        charts=repair_db.report_charts(start, end),
+        stages=stages,
         board_stages=repair_db.BOARD_STAGES,
-        start=start,
-        end=end,
-        prev_start=start - timedelta(days=7),
-        prev_end=end - timedelta(days=7),
-        next_start=start + timedelta(days=7),
-        next_end=end + timedelta(days=7),
+        **nav,
     )
 
 
