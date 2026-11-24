@@ -138,7 +138,11 @@ requires a name + PIN sign-in, but PINs are short by design.
 ### Try it without touching Zendesk
 
 `tests/demo_server.py` runs the app against a fake Zendesk (posts are printed
-to the console, never sent) and a throwaway database. It seeds "Demo Tech", PIN 1234.
+to the console, never sent) and a throwaway database. It seeds "Demo Tech", PIN 1234,
+and, on an empty database, about four months of made-up repair history (tickets 6001
+and up, `tests/demo_history.py`) so the report, queue and final reports have something
+to show. Tickets 7101-7104 are left for you to add from Incoming. Set
+`DEMO_SAMPLE_HISTORY=0` to start empty.
 
 ```powershell
 $env:DEMO_DATABASE_URL = "postgresql://postgres:portal_dev@localhost:5433/portal_demo"

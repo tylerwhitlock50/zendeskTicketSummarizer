@@ -1665,3 +1665,30 @@ def test_ad_settings_defaults(client, zd, tech):
     client.post("/t/500/stage/received", data=RECEIVED)
     [e] = atf_log.entries_for_ticket(500)
     assert e["manufacturer"] == "Other Maker" and e["firearm_type"] == "Receiver"
+
+
+@needs_db
+def test_demo_sample_history(client, zd, tech):
+    from datetime import timedelta
+
+    from tests import demo_history
+
+    assert demo_history.seed(TEST_DSN) == 150
+    assert demo_history.seed(TEST_DSN) == 0  # only ever fills an empty database
+    assert [t["name"] for t in repair_db.list_techs()] == ["Kyler"]  # sample techs stay off sign-in
+    assert repair_db.final_reports_ready_count() == demo_history.REPORTS_WAITING
+    assert not repair_db.rma_ids([7101, 7102, 7103, 7104])  # left for visitors to add
+    today = repair_db_today()
+    data = repair_db.report(today - timedelta(days=89), today)
+    assert data["turnaround"]["shipped"] > 50 and data["problems"] and data["techs"]
+    charts = repair_db.report_charts(today - timedelta(days=89), today)
+    assert sum(charts["daily"]["shipped"]) > 50
+    assert any(n for counts in charts["aging"].values() for n in counts[3:])  # some open ones are late
+    # The A&D log has what the Received / Shipped scans would have written.
+    received = [r for r in repair_db.board(shipped_days=365).values() for r in r if r["received_at"]]
+    on_hand = atf_log.on_hand()
+    assert on_hand and all(e["acquired_from_address"] and e["serial_number"] for e in on_hand)
+    assert len(on_hand) == sum(1 for r in received if r["stage"] != "shipped")
+    assert not atf_log.needs_review()
+    for path in ("/report/", "/queue", "/final-reports", "/t/6001", "/t/6001/report", "/ad/"):
+        assert client.get(path).status_code == 200, path
