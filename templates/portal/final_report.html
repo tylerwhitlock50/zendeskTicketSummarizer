@@ -1,0 +1,77 @@
+{% extends "portal/base.html" %}
+{% block title %}Final report #{{ ticket.id }}{% endblock %}
+{% block main_class %}wide{% endblock %}
+{% block content %}
+<header class="ticket-head">
+  <div class="ticket-head-top">
+    <a class="ticket-id" href="{{ url_for('portal.action_page', ticket_id=ticket.id) }}">Ticket #{{ ticket.id }}</a>
+    <span class="badge status-{{ ticket.status }}">{{ ticket.status|capitalize }}</span>
+    {% if saved and saved.sent_at %}<span class="ok-tag">sent {{ saved.sent_at|localtime }} by {{ saved.sent_by }}</span>
+    {% elif saved and saved.body %}<span class="subtle">draft edited {{ saved.edited_at|localtime }} by {{ saved.edited_by }}</span>{% endif %}
+  </div>
+  <h1>Final repair report</h1>
+  <p class="meta">{{ ticket.subject or '(no subject)' }} &middot; to {{ requester.name if requester else 'the requester' }}{% if requester and requester.email %} &lt;{{ requester.email }}&gt;{% endif %}</p>
+  <p class="meta"><a href="{{ url_for('portal.final_reports') }}">&larr; All final reports</a></p>
+</header>
+
+{% if not tech %}
+<div class="notice warn"><a href="{{ url_for('portal.tech_signin', next=request.path) }}">Sign in</a> to edit or send the report.</div>
+{% endif %}
+{% if closed %}
+<div class="notice warn">This ticket is closed in Zendesk, so the report can't be sent from here. Copy the text and ask CS to send it on a follow-up ticket.</div>
+{% elif not ready %}
+<div class="notice warn">This rifle hasn't shipped yet, so the report has no return tracking. You can edit the draft now and send it once it ships.</div>
+{% endif %}
+
+<div class="final-layout">
+  <section class="panel">
+    {% if saved and saved.sent_at %}
+      <h2>What was sent</h2>
+      <pre class="report-text">{{ saved.sent_body }}</pre>
+      <form method="post" action="{{ url_for('portal.save_final_report', ticket_id=ticket.id) }}" class="inline-form">
+        {{ csrf_field() }}<input type="hidden" name="op" value="reopen">
+        <button type="submit" class="secondary-btn" {% if not tech %}disabled{% endif %}>Send a corrected report</button>
+      </form>
+    {% else %}
+      <h2>Review and edit <span class="subtle">this exact text is emailed to the customer</span></h2>
+      <form method="post" class="final-form" id="final-form"
+            action="{{ url_for('portal.send_final_report', ticket_id=ticket.id) }}"
+            data-preview="{{ url_for('portal.preview_final_report', ticket_id=ticket.id) }}">
+        {{ csrf_field() }}
+        <textarea name="body" rows="26" class="report-editor" spellcheck="true" {% if not tech %}readonly{% endif %}>{{ body }}</textarea>
+        <div class="final-actions">
+          <button type="submit" formaction="{{ url_for('portal.save_final_report', ticket_id=ticket.id) }}" formnovalidate
+                  name="op" value="save" class="secondary-btn" data-no-preview {% if not tech %}disabled{% endif %}>Save draft</button>
+          <button type="submit" formaction="{{ url_for('portal.save_final_report', ticket_id=ticket.id) }}" formnovalidate
+                  name="op" value="rebuild" class="link-btn" data-no-preview {% if not tech or not (saved and saved.body) %}disabled{% endif %}
+                  title="Discard edits and rebuild from the repair record">Rebuild from record</button>
+          <button type="submit" class="primary-btn" {% if not tech or closed %}disabled{% endif %}>Review and send</button>
+        </div>
+      </form>
+    {% endif %}
+  </section>
+
+  <aside class="panel record-aside">
+    <h2>Repair record <span class="subtle">for checking the report</span></h2>
+    <dl class="record">
+      <dt>Rifle</dt><dd>{{ rma.model or rma.zd_model or '—' }} {{ rma.caliber or rma.zd_caliber or '' }}</dd>
+      <dt>Serial</dt><dd class="mono">{{ rma.serial_number or rma.zd_serial or '—' }}{% if rma.serial_match is false %} <span class="bad-tag">≠ ticket {{ rma.zd_serial }}</span>{% endif %}</dd>
+      <dt>Problems</dt><dd>{{ rma.problem_summary or '—' }}</dd>
+      {% if rma.problem_notes %}<dt>Internal notes</dt><dd class="subtle">{{ rma.problem_notes }} <em>(not in the report)</em></dd>{% endif %}
+      <dt>Repairs</dt><dd>{{ rma.solution_summary or '—' }}{% if rma.work_done %} — {{ rma.work_done }}{% endif %}</dd>
+      <dt>Parts</dt><dd>{{ rma.parts_used or '—' }}</dd>
+      <dt>Root cause</dt><dd>{{ rma.root_cause or '—' }}{% if rma.coverage %} &middot; {{ coverage_words[rma.coverage] }}{% endif %} <span class="subtle">(internal)</span></dd>
+      <dt>Final check</dt><dd>{{ {'pass': 'Passed', 'fail': 'FAILED'}.get(rma.function_check, 'not done') }}{% if rma.ship_override %} <span class="bad-tag">shipped on manager OK</span>{% endif %}</dd>
+      <dt>Shipped</dt><dd>{% if rma.shipped_at %}{{ rma.shipped_at|localtime }} &middot; <span class="mono">{{ rma.tracking_number }}</span>{% else %}not yet{% endif %}</dd>
+      <dt>Delivered</dt><dd>{{ rma.delivered_at|localtime if rma.delivered_at else 'not yet' }}</dd>
+    </dl>
+  </aside>
+</div>
+{% include 'portal/_confirm.html' %}
+<script>
+  // Save / Rebuild don't need the confirm pop-up: only "Review and send" does.
+  document.querySelectorAll("[data-no-preview]").forEach(function (b) {
+    b.addEventListener("click", function () { b.form.dataset.approved = "1"; });
+  });
+</script>
+{% endblock %}

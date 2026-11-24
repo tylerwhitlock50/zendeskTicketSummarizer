@@ -11,7 +11,11 @@ from flask import Blueprint, flash, redirect, render_template, request, session,
 import auth
 import db
 import repair_db
+import repair_settings
+import tracking
+import portal_views
 from portal_views import intake_tag, portal_tag, stage_field_id
+from zendesk_client import ZendeskError
 
 admin_bp = Blueprint("admin", __name__, url_prefix="/admin")
 
@@ -21,6 +25,7 @@ LIST_TITLES = (
     ("accessory", "Items received with it (Received)"),
     ("problem", "Problems found (Inspected)"),
     ("solution", "Repairs done (Repair complete)"),
+    ("root_cause", "Root causes (Repair complete)"),
 )
 
 
@@ -63,6 +68,13 @@ def logout():
 def settings():
     if not db.available():
         return render_template("portal/settings.html", ready=False), 503
+    current = repair_settings.load()
+    zd_fields, zd_error = {}, None
+    try:
+        zd_fields = portal_views._get_zendesk().get_ticket_fields()
+    except ZendeskError as exc:
+        zd_error = str(exc)
+    resolved = repair_settings.resolve_roles(zd_fields, current)
     return render_template(
         "portal/settings.html",
         ready=True,
@@ -72,6 +84,13 @@ def settings():
             for kind, title in LIST_TITLES
         ],
         techs=repair_db.list_techs(include_inactive=True),
+        settings=current,
+        field_roles=repair_settings.FIELD_ROLES,
+        zd_fields=zd_fields,
+        zd_fields_error=zd_error,
+        resolved=resolved,
+        tracking_provider=tracking.provider_name(),
+        tracking_ready=tracking.provider_ready(),
         actions=db.list_quick_actions(include_inactive=True),
         base_tag=portal_tag(),
         intake=intake_tag(),
@@ -178,3 +197,45 @@ def save_action():
         )
         flash(f"Saved “{label}”.", "success")
     return _done("actions")
+
+
+@admin_bp.route("/fields", methods=["POST"])
+@auth.admin_required
+def save_fields():
+    """Which Zendesk ticket fields hold the serial, model, caliber... (blank = match by title)."""
+    values = {}
+    for role, _title, _pattern in repair_settings.FIELD_ROLES:
+        raw = (request.form.get(f"field_{role}") or "").strip()
+        values[f"field_{role}"] = raw if raw.isdigit() else ""
+    repair_db.save_settings(values)
+    flash("Saved the Zendesk field mapping. Tickets pick it up the next time they're opened.", "success")
+    return _done("fields")
+
+
+@admin_bp.route("/messages", methods=["POST"])
+@auth.admin_required
+def save_messages():
+    form = request.form
+    delivered = (form.get("delivered_message") or "").strip()
+    template = (form.get("final_report_template") or "").replace(chr(13) + chr(10), chr(10)).strip()
+    if not delivered or not template:
+        flash("The delivered message and the report template can't be empty.", "error")
+        return _done("delivery")
+    repair_db.save_settings({
+        "delivered_message": delivered,
+        "delivered_auto": "1" if form.get("delivered_auto") == "on" else "0",
+        "delivered_zendesk_value": (form.get("delivered_zendesk_value") or "").strip(),
+        "final_report_template": template,
+    })
+    flash("Saved the delivered email and the final report template.", "success")
+    return _done("delivery")
+
+
+@admin_bp.route("/messages/reset", methods=["POST"])
+@auth.admin_required
+def reset_message():
+    key = request.form.get("key")
+    if key in ("delivered_message", "final_report_template"):
+        repair_db.save_settings({key: repair_settings.DEFAULTS[key]})
+        flash("Put back the original wording.", "success")
+    return _done("delivery")

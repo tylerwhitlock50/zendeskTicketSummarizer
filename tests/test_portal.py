@@ -37,13 +37,23 @@ import repair_db  # noqa: E402
 
 needs_db = pytest.mark.skipif(not TEST_DSN, reason="TEST_DATABASE_URL not set")
 
-RECEIVED = {"arrival_damage": "no"}
+RECEIVED = {"arrival_damage": "no", "arrival_clear": "clear", "serial_number": "CA12345",
+            "model": "Ridgeline", "caliber": "6.5 Creedmoor"}
+SHIP_OK = {"ship_serial": "CA12345", "ship_unloaded": "1"}
+SHIPPED = {**SHIP_OK, "ship_failed": "1"}  # these tests ship without a final test (manager OK)
+FINAL = {"function_check": "pass", "test_required": "no"}
 
 
 def inspected():
     """Answers every inspection point OK and the complaint question, for stage posts."""
     points = repair_db.list_choices("inspection_point")
-    return {**{f"point_{p['id']}": "ok" for p in points}, "complaint_match": "yes"}
+    return {**{f"point_{p['id']}": "ok" for p in points}, "complaint_match": "yes", "headspace": "pass"}
+
+
+def repaired():
+    """The root cause and coverage every Repair complete post needs."""
+    cause = repair_db.list_choices("root_cause")[0]
+    return {"root_cause_id": cause["id"], "coverage": "warranty"}
 
 
 # ---------------------------------------------------------------- fakes
@@ -60,6 +70,14 @@ class FakeZendesk:
         self.delay = 0.0
         self.uploaded = {}
         self.comments = {}
+        self.custom_fields = []  # [{"id", "value"}] on every ticket
+        self.fields = {
+            301: {"id": 301, "title": "Serial number", "active": True},
+            302: {"id": 302, "title": "Model", "active": True,
+                  "custom_field_options": [{"name": "Ridgeline FFT", "value": "ridgeline_fft"}]},
+            303: {"id": 303, "title": "Caliber", "active": True},
+            304: {"id": 304, "title": "Inbound tracking number", "active": True},
+        }
 
     def get_ticket(self, ticket_id):
         ticket = {
@@ -68,7 +86,7 @@ class FakeZendesk:
             "status": self.status,
             "updated_at": "2026-11-20T10:00:00Z",
             "created_at": "2026-11-01T10:00:00Z",
-            "custom_fields": [],
+            "custom_fields": list(self.custom_fields),
             "description": "My rifle won't group under 3 MOA since the last trip.",
         }
         requester = {"id": 1, "name": "Jane Hunter", "email": "jane@example.com"}
@@ -120,6 +138,9 @@ class FakeZendesk:
         self.queries.append(query)
         yield from self.search_results
 
+    def get_ticket_fields(self):
+        return self.fields
+
 
 # ---------------------------------------------------------------- fixtures
 
@@ -144,7 +165,7 @@ def migrated():
 def clean_db(migrated):
     with psycopg.connect(TEST_DSN, autocommit=True) as conn:
         conn.execute(
-            "TRUNCATE repair.event, repair.rma, repair.tech, portal.action_log RESTART IDENTITY CASCADE"
+            "TRUNCATE repair.event, repair.rma, repair.tech, repair.setting, portal.action_log RESTART IDENTITY CASCADE"
         )
     yield
 
@@ -188,12 +209,19 @@ def _add(client, ticket_id=500):
 # ---------------------------------------------------------------- no database
 
 
-def test_scan_go_parses_id_and_urls(client):
+@needs_db
+def test_scan_go_parses_id_and_urls(clean_db, client, zd):
     resp = client.get("/scan/go?ticket_id=1234")
     assert resp.status_code == 302 and resp.headers["Location"].endswith("/t/1234")
+    resp = client.get("/scan/go?ticket_id=%231234")
+    assert resp.headers["Location"].endswith("/t/1234")
     resp = client.get("/scan/go?ticket_id=https://example.zendesk.com/agent/tickets/987")
     assert resp.headers["Location"].endswith("/t/987")
     resp = client.get("/scan/go?ticket_id=not-a-ticket")
+    assert "/scan" in resp.headers["Location"] and "Nothing+matches" in resp.headers["Location"]
+    assert zd.queries == ['"not-a-ticket"']
+    # A long all-digit scan is a tracking number, never read as a ticket ID.
+    resp = client.get("/scan/go?ticket_id=776543219876")
     assert "/scan" in resp.headers["Location"]
 
 
@@ -342,21 +370,22 @@ def test_inspected_needs_problem_and_keeps_notes_internal(client, zd, tech):
 def test_repaired_uses_solution_when_work_done_blank(client, zd, tech):
     _add(client)
     sol = _choice("solution", "Adjusted trigger")
-    client.post("/t/500/stage/repaired", data={"solution_ids": [sol["id"]], "work_done": ""})
+    client.post("/t/500/stage/repaired", data={**repaired(), "solution_ids": [sol["id"]], "work_done": ""})
     assert "Work performed: Adjusted trigger." in zd.updates[0]["body"]
     _add(client, 501)
-    client.post("/t/501/stage/repaired", data={"solution_ids": [sol["id"]], "work_done": "Reset sear engagement"})
+    client.post("/t/501/stage/repaired", data={**repaired(), "solution_ids": [sol["id"]], "work_done": "Reset sear engagement"})
     assert "Work performed: Reset sear engagement." in zd.updates[1]["body"]
 
 
 @needs_db
 def test_shipped_requires_tracking(client, zd, tech):
     _add(client)
-    client.post("/t/500/stage/shipped", data={"tracking_number": ""})
-    client.post("/t/500/stage/shipped", data={"tracking_number": "<script>"})
+    client.post("/t/500/stage/shipped", data={**SHIPPED, "tracking_number": ""})
+    client.post("/t/500/stage/shipped", data={**SHIPPED, "tracking_number": "<script>"})
     assert zd.updates == []
-    client.post("/t/500/stage/shipped", data={"tracking_number": "1Z999AA10123456784"})
-    assert "Tracking number: 1Z999AA10123456784." in zd.updates[0]["body"]
+    client.post("/t/500/stage/shipped", data={**SHIPPED, "tracking_number": "1Z999AA10123456784"})
+    body = zd.updates[0]["body"]
+    assert "via UPS, tracking number 1Z999AA10123456784.\nTrack it here: https://www.ups.com/track?tracknum=" in body
     rma = repair_db.get_rma(500)
     assert rma["stage"] == "shipped" and rma["tracking_number"] == "1Z999AA10123456784"
 
@@ -449,7 +478,7 @@ def test_stage_preview_matches_the_post_and_sends_nothing(client, zd, tech):
 @needs_db
 def test_stage_preview_reports_form_errors(client, zd, tech):
     _add(client)
-    data = client.post("/t/500/stage/shipped/preview", data={"tracking_number": ""}).get_json()
+    data = client.post("/t/500/stage/shipped/preview", data={**SHIPPED, "tracking_number": ""}).get_json()
     assert data["ok"] is False and "tracking" in data["error"]
     data = client.post("/t/500/stage/received/preview", data={**RECEIVED, "file_names": "x.exe"}).get_json()
     assert data["ok"] is False and "x.exe" in data["error"]
@@ -486,7 +515,7 @@ def test_report_and_csv(client, zd, tech):
     client.post("/t/500/stage/received", data=RECEIVED)
     trig = _choice("problem", "Trigger")
     client.post("/t/500/stage/inspected", data={**inspected(), "problem_ids": [trig["id"]]})
-    client.post("/t/500/stage/shipped", data={"tracking_number": "1Z999AA10123456784"})
+    client.post("/t/500/stage/shipped", data={**SHIPPED, "tracking_number": "1Z999AA10123456784"})
     today = repair_db_today()
     data = repair_db.report(today, today)
     assert data["stage_counts"]["received"] == 1 and data["stage_counts"]["added"] == 1
@@ -561,7 +590,7 @@ def test_earlier_stage_needs_move_back_and_resets_later_times(client, zd, tech, 
     client.post("/t/500/stage/received", data=RECEIVED)
     trig = _choice("problem", "Trigger")
     client.post("/t/500/stage/inspected", data={**inspected(), "problem_ids": [trig["id"]]})
-    client.post("/t/500/stage/shipped", data={"tracking_number": "1Z999AA10123456784"})
+    client.post("/t/500/stage/shipped", data={**SHIPPED, "tracking_number": "1Z999AA10123456784"})
     sent = len(zd.updates)
 
     resp = client.post("/t/500/stage/received", data=RECEIVED, follow_redirects=True)
@@ -755,7 +784,7 @@ def test_repair_complete_is_multi_select_too(client, zd, tech):
     trig = _choice("solution", "Adjusted trigger")
     client.post(
         "/t/500/stage/repaired",
-        data={"solution_ids": [rebed["id"], trig["id"]], "solution_other": "Lapped lugs", "solution_add": "1"},
+        data={**repaired(), "solution_ids": [rebed["id"], trig["id"]], "solution_other": "Lapped lugs", "solution_add": "1"},
     )
     body = zd.updates[0]["body"]
     assert "Work performed: " in body and "Re-bedded action" in body and "Lapped lugs" in body
@@ -774,7 +803,7 @@ def test_reposting_inspection_replaces_picks(client, zd, tech, monkeypatch):
     bolt = _choice("problem", "Bolt or action")
     sol = _choice("solution", "Adjusted trigger")
     client.post("/t/500/stage/inspected", data={**inspected(), "problem_ids": [trig["id"], bolt["id"]]})
-    client.post("/t/500/stage/repaired", data={"solution_ids": [sol["id"]]})
+    client.post("/t/500/stage/repaired", data={**repaired(), "solution_ids": [sol["id"]]})
     client.post("/t/500/stage/inspected", data={**inspected(), "problem_ids": [bolt["id"]], "move_back": "1"})
     rma = repair_db.get_rma(500)
     assert rma["problem_ids"] == [bolt["id"]]
@@ -841,13 +870,14 @@ def test_received_lists_accessories_condition_and_photos(client, zd, tech):
     sling = _choice("accessory", "Sling")
     resp = client.post(
         "/t/500/stage/received",
-        data={"accessory_ids": [scope["id"], sling["id"]], "arrival_damage": "yes", "arrival_notes": ""},
+        data={**RECEIVED, "accessory_ids": [scope["id"], sling["id"]], "arrival_damage": "yes", "arrival_notes": ""},
         follow_redirects=True,
     )
     assert b"Describe the damage" in resp.data and zd.updates == []
     client.post(
         "/t/500/stage/received",
         data={
+            **RECEIVED,
             "accessory_ids": [scope["id"], sling["id"]],
             "accessory_other": "Spare bolt",
             "arrival_damage": "yes",
@@ -870,7 +900,7 @@ def test_received_lists_accessories_condition_and_photos(client, zd, tech):
 @needs_db
 def test_received_without_damage_has_no_arrival_note(client, zd, tech):
     _add(client)
-    client.post("/t/500/stage/received", data={"arrival_damage": "no"})
+    client.post("/t/500/stage/received", data=RECEIVED)
     assert "Items received with it: none." in zd.updates[0]["body"]
     assert "noted the following" not in zd.updates[0]["body"]
 
@@ -908,7 +938,7 @@ def test_inspection_checklist_required_and_sent_to_customer(client, zd, tech):
     answers[f"point_{points[-1]['id']}"] = "na"
     client.post(
         "/t/500/stage/inspected",
-        data={**answers, "complaint_match": "partly", "problem_ids": [trig["id"]]},
+        data={**answers, "complaint_match": "partly", "headspace": "pass", "problem_ids": [trig["id"]]},
     )
     body = zd.updates[0]["body"]
     assert "inspected your rifle (11-point inspection):" in body
@@ -936,7 +966,7 @@ def test_accuracy_pass_emails_customer(client, zd, tech):
     _add(client)
     client.post(
         "/t/500/stage/tested",
-        data={"test_required": "yes", "test_result": "pass", "group_size": "0.75", "group_unit": "moa",
+        data={"function_check": "pass", "test_required": "yes", "test_result": "pass", "group_size": "0.75", "group_unit": "moa",
               "test_distance": "100", "test_ammo": "Hornady 143gr ELD-X"},
     )
     u = zd.updates[0]
@@ -952,7 +982,7 @@ def test_accuracy_fail_is_internal_and_flags(client, zd, tech):
     _add(client)
     client.post(
         "/t/500/stage/tested",
-        data={"test_required": "yes", "test_result": "fail", "group_size": "2.5", "group_unit": "in",
+        data={"function_check": "pass", "test_required": "yes", "test_result": "fail", "group_size": "2.5", "group_unit": "in",
               "test_distance": "100", "test_ammo": "Federal GMM"},
     )
     u = zd.updates[0]
@@ -968,10 +998,10 @@ def test_accuracy_not_required_is_internal_and_clears_old_result(client, zd, tec
     _add(client)
     client.post(
         "/t/500/stage/tested",
-        data={"test_required": "yes", "test_result": "pass", "group_size": "0.8", "group_unit": "moa",
+        data={"function_check": "pass", "test_required": "yes", "test_result": "pass", "group_size": "0.8", "group_unit": "moa",
               "test_distance": "100", "test_ammo": "Federal GMM"},
     )
-    client.post("/t/500/stage/tested", data={"test_required": "no"})
+    client.post("/t/500/stage/tested", data={"function_check": "pass", "test_required": "no"})
     u = zd.updates[1]
     assert u["public"] is False and "not required" in u["body"]
     assert u["tags"] == ["repair-portal", "rp-tested"]  # Zendesk views/stage field still see the stage
@@ -983,7 +1013,7 @@ def test_accuracy_not_required_is_internal_and_clears_old_result(client, zd, tec
 @needs_db
 def test_accuracy_validates_numbers(client, zd, tech):
     _add(client)
-    base = {"test_required": "yes", "test_result": "pass", "group_unit": "moa", "test_ammo": "x"}
+    base = {"function_check": "pass", "test_required": "yes", "test_result": "pass", "group_unit": "moa", "test_ammo": "x"}
     resp = client.post("/t/500/stage/tested", data={**base, "group_size": "abc"}, follow_redirects=True)
     assert b"Enter the group size" in resp.data
     resp = client.post("/t/500/stage/tested", data={**base, "group_size": "1", "test_ammo": ""}, follow_redirects=True)
@@ -1097,15 +1127,15 @@ def test_failed_test_blocks_shipping_without_override(client, zd, tech):
     _add(client)
     client.post(
         "/t/500/stage/tested",
-        data={"test_required": "yes", "test_result": "fail", "group_size": "3", "group_unit": "moa",
+        data={"function_check": "pass", "test_required": "yes", "test_result": "fail", "group_size": "3", "group_unit": "moa",
               "test_distance": "100", "test_ammo": "Federal GMM"},
     )
     page = client.get("/t/500").data
     assert b"Ship anyway" in page
-    resp = client.post("/t/500/stage/shipped", data={"tracking_number": "1Z999AA10123456784"},
+    resp = client.post("/t/500/stage/shipped", data={**SHIP_OK, "tracking_number": "1Z999AA10123456784"},
                        follow_redirects=True)
     assert b"failed its accuracy test" in resp.data and len(zd.updates) == 1
-    client.post("/t/500/stage/shipped", data={"tracking_number": "1Z999AA10123456784", "ship_failed": "1"})
+    client.post("/t/500/stage/shipped", data={**SHIP_OK, "tracking_number": "1Z999AA10123456784", "ship_failed": "1"})
     assert repair_db.get_rma(500)["stage"] == "shipped" and len(zd.updates) == 2
 
 
@@ -1154,3 +1184,288 @@ def test_file_proxy_reuses_the_page_lookup(client, zd, tech, monkeypatch):
     for a in zd.comments[500][0]["attachments"]:
         assert client.get(f"/t/500/file/{a['id']}").status_code == 200
     assert calls == [500]  # one listing for the page; thumbnails come from the cache
+
+
+# ---------------------------------------------------------------- QC pass: product data, verification, delivery, reports
+
+import delivery  # noqa: E402
+import tracking  # noqa: E402
+
+ZD_RIFLE = [{"id": 301, "value": "CA-12345"}, {"id": 302, "value": "ridgeline_fft"},
+            {"id": 303, "value": "6.5 Creedmoor"}, {"id": 304, "value": "1Z999AA10123456784"}]
+
+
+def test_carrier_detection_and_links():
+    assert tracking.detect_carrier("1Z 999 AA1 0123456784") == "ups"
+    assert tracking.detect_carrier("776543219876") == "fedex"
+    assert tracking.detect_carrier("9400111899223344556677") == "usps"
+    assert tracking.detect_carrier("hello") is None
+    assert tracking.tracking_url("1Z999AA10123456784").startswith("https://www.ups.com/")
+    assert tracking.tracking_url("hello") == ""
+
+
+def _ship_ready(client, zd):
+    """Add, receive (serial verified) and pass the final test."""
+    _add(client)
+    client.post("/t/500/stage/received", data={**RECEIVED, "serial_number": "ca 12345"})
+    client.post("/t/500/stage/tested", data=FINAL)
+
+
+@needs_db
+def test_ticket_fields_copied_for_product_mapping(client, zd, tech):
+    zd.custom_fields = ZD_RIFLE + [{"id": 999, "value": "Dealer X"}]
+    zd.fields[999] = {"id": 999, "title": "Dealer", "active": True}
+    _add(client)
+    rma = repair_db.get_rma(500)
+    assert rma["zd_serial"] == "CA-12345" and rma["zd_model"] == "Ridgeline FFT"
+    assert rma["zd_caliber"] == "6.5 Creedmoor" and rma["zd_inbound_tracking"] == "1Z999AA10123456784"
+    assert {"title": "Dealer", "value": "Dealer X"} in rma["ticket_fields"]
+    page = client.get("/t/500").data
+    assert b"Ridgeline FFT" in page and b"CA-12345" in page and b"Dealer X" in page
+    # CS corrects the ticket: the copy follows the next time the ticket is opened.
+    zd.custom_fields = [{"id": 301, "value": "CA-99999"}]
+    client.get("/t/500")
+    assert repair_db.get_rma(500)["zd_serial"] == "CA-99999"
+
+
+@needs_db
+def test_field_mapping_in_settings_overrides_title_match(client, zd, tech):
+    zd.fields[305] = {"id": 305, "title": "Rifle S/N (warranty card)", "active": True}
+    zd.custom_fields = ZD_RIFLE + [{"id": 305, "value": "WC-777"}]
+    resp = client.post("/admin/fields", data={"field_serial": "305"})
+    assert resp.status_code == 302
+    _add(client)
+    assert repair_db.get_rma(500)["zd_serial"] == "WC-777"
+    assert b"Rifle S/N (warranty card)" in client.get("/admin/").data
+
+
+@needs_db
+def test_received_checks_serial_against_ticket(client, zd, tech):
+    zd.custom_fields = ZD_RIFLE
+    _add(client)
+    resp = client.post("/t/500/stage/received", data={**RECEIVED, "serial_number": "CA54321"}, follow_redirects=True)
+    assert b"doesn&#39;t match the ticket" in resp.data and zd.updates == []
+    client.post("/t/500/stage/received", data={**RECEIVED, "serial_number": "CA54321", "serial_confirm": "1"})
+    u = zd.updates[0]
+    assert u["public"] is False and "does not match the ticket (CA-12345)" in u["body"]
+    rma = repair_db.get_rma(500)
+    assert rma["serial_match"] is False and rma["flag"] == "Serial mismatch" and rma["stage"] == "received"
+    assert repair_db.events_for(500)[0]["customer_message"] is None
+
+
+@needs_db
+def test_received_serial_match_ignores_spaces_and_dashes(client, zd, tech):
+    zd.custom_fields = ZD_RIFLE
+    _add(client)
+    client.post("/t/500/stage/received", data={**RECEIVED, "serial_number": "ca 12345",
+                                                "inbound_tracking": "1Z999AA10123456784"})
+    assert zd.updates[0]["public"] is True
+    rma = repair_db.get_rma(500)
+    assert rma["serial_match"] is True and rma["inbound_match"] is True and rma["flag"] is None
+    assert rma["model"] == "Ridgeline" and rma["caliber"] == "6.5 Creedmoor"
+
+
+@needs_db
+def test_received_requires_safety_check_and_flags_loaded(client, zd, tech):
+    _add(client)
+    data = dict(RECEIVED)
+    del data["arrival_clear"]
+    resp = client.post("/t/500/stage/received", data=data, follow_redirects=True)
+    assert b"Safety first" in resp.data and zd.updates == []
+    client.post("/t/500/stage/received", data={**RECEIVED, "arrival_clear": "loaded"})
+    rma = repair_db.get_rma(500)
+    assert rma["arrived_loaded"] is True and rma["flag"] == "Arrived loaded"
+
+
+@needs_db
+def test_repair_complete_needs_root_cause_and_coverage(client, zd, tech):
+    _add(client)
+    sol = _choice("solution", "Adjusted trigger")
+    resp = client.post("/t/500/stage/repaired", data={"solution_ids": [sol["id"]]}, follow_redirects=True)
+    assert b"root cause" in resp.data and zd.updates == []
+    client.post("/t/500/stage/repaired", data={**repaired(), "solution_ids": [sol["id"]],
+                                                "parts_used": "TRG-0042 x1", "trigger_pull_after": "3.25"})
+    rma = repair_db.get_rma(500)
+    assert rma["root_cause"] and rma["coverage"] == "warranty" and float(rma["trigger_pull_after"]) == 3.25
+    assert "Root cause" not in zd.updates[0]["body"]  # internal only
+
+
+@needs_db
+def test_failed_function_check_is_internal_and_blocks_shipping(client, zd, tech):
+    _add(client)
+    client.post("/t/500/stage/tested", data={"function_check": "fail", "test_required": "no",
+                                              "function_notes": "Safety doesn't engage"})
+    u = zd.updates[0]
+    assert u["public"] is False and "Safety doesn't engage" in u["body"]
+    assert repair_db.get_rma(500)["flag"] == "Failed final check"
+    resp = client.post("/t/500/stage/shipped", data={**SHIP_OK, "tracking_number": "1Z999AA10123456784"},
+                       follow_redirects=True)
+    assert b"failed its final safety" in resp.data and len(zd.updates) == 1
+
+
+@needs_db
+def test_shipping_checks_the_serial_going_in_the_box(client, zd, tech):
+    zd.custom_fields = ZD_RIFLE
+    _ship_ready(client, zd)
+    n = len(zd.updates)
+    resp = client.post("/t/500/stage/shipped", data={**SHIP_OK, "ship_serial": "CA99999",
+                                                       "tracking_number": "1Z999AA10123456784"}, follow_redirects=True)
+    assert b"Wrong rifle?" in resp.data and len(zd.updates) == n
+    resp = client.post("/t/500/stage/shipped", data={"ship_serial": "CA12345", "tracking_number": "1Z999AA10123456784"},
+                       follow_redirects=True)
+    assert b"unloaded" in resp.data and len(zd.updates) == n
+    client.post("/t/500/stage/shipped", data={**SHIP_OK, "tracking_number": "1Z999AA10123456784"})
+    rma = repair_db.get_rma(500)
+    assert rma["stage"] == "shipped" and rma["return_carrier"] == "ups" and rma["ship_override"] is False
+    assert "https://www.ups.com/track?tracknum=1Z999AA10123456784" in zd.updates[-1]["body"]
+
+
+@needs_db
+def test_scan_finds_rma_by_serial_or_tracking(client, zd, tech):
+    zd.custom_fields = ZD_RIFLE
+    _add(client)
+    resp = client.get("/scan/go?ticket_id=CA12345")  # ticket says CA-12345
+    assert resp.headers["Location"].endswith("/t/500")
+    resp = client.get("/scan/go?ticket_id=1Z999AA10123456784")  # the box's label
+    assert resp.headers["Location"].endswith("/t/500")
+    resp = client.get("/scan/go?ticket_id=500")  # the one-pager barcode
+    assert resp.headers["Location"].endswith("/t/500")
+    zd.search_results = [{"id": 812, "subject": "x", "status": "open", "created_at": "2026-11-01T00:00:00Z"}]
+    resp = client.get("/scan/go?ticket_id=ZZ-UNKNOWN-1")  # not in the queue: Zendesk search
+    assert resp.headers["Location"].endswith("/t/812")
+
+
+@needs_db
+def test_manual_mark_delivered_emails_once(client, zd, tech):
+    _ship_ready(client, zd)
+    client.post("/t/500/stage/shipped", data={**SHIP_OK, "tracking_number": "1Z999AA10123456784"})
+    n = len(zd.updates)
+    preview = client.post("/t/500/delivery/preview", data={"email": "1"}).get_json()
+    assert preview["ok"] and preview["posts"][0]["public"] and len(zd.updates) == n
+    client.post("/t/500/delivery/mark", data={"email": "1"})
+    u = zd.updates[-1]
+    assert u["public"] is True and "rp-delivered" in u["tags"] and "delivered on" in u["body"]
+    assert u["body"] == preview["posts"][0]["body"]
+    client.post("/t/500/delivery/mark", data={"email": "1"})
+    assert len(zd.updates) == n + 1
+    assert repair_db.get_rma(500)["delivered_at"] is not None
+    assert repair_db.events_for(500)[0]["kind"] == "delivery"
+
+
+@needs_db
+def test_tracking_check_emails_when_delivered(client, zd, tech, monkeypatch):
+    _ship_ready(client, zd)
+    client.post("/t/500/stage/shipped", data={**SHIP_OK, "tracking_number": "1Z999AA10123456784"})
+    n = len(zd.updates)
+    monkeypatch.setenv("TRACKING_PROVIDER", "easypost")
+    monkeypatch.setenv("EASYPOST_API_KEY", "test")
+    answers = iter([
+        {"status": "in_transit", "detail": "Departed facility", "delivered_at": None},
+        {"status": "delivered", "detail": "Front door", "delivered_at": "2026-11-20T18:30:00Z"},
+    ])
+    monkeypatch.setattr(tracking, "check", lambda number, carrier: next(answers))
+    assert delivery.check_all(zd, recheck_minutes=0) == {"in_transit": 1}
+    assert len(zd.updates) == n and repair_db.get_rma(500)["delivery_status"] == "in_transit"
+    assert delivery.check_all(zd, recheck_minutes=0) == {"delivered": 1}
+    u = zd.updates[-1]
+    assert u["public"] and "November 20" in u["body"] and "UPS" in u["body"]
+    assert delivery.check_all(zd, recheck_minutes=0) == {}  # delivered RMAs aren't checked again
+    assert len(zd.updates) == n + 1
+
+
+@needs_db
+def test_delivered_auto_email_can_be_turned_off(client, zd, tech, monkeypatch):
+    _ship_ready(client, zd)
+    client.post("/t/500/stage/shipped", data={**SHIP_OK, "tracking_number": "1Z999AA10123456784"})
+    n = len(zd.updates)
+    repair_db.save_settings({"delivered_auto": "0"})
+    monkeypatch.setenv("TRACKING_PROVIDER", "easypost")
+    monkeypatch.setenv("EASYPOST_API_KEY", "test")
+    monkeypatch.setattr(tracking, "check", lambda n_, c: {"status": "delivered", "detail": "", "delivered_at": None})
+    try:
+        delivery.check_all(zd, recheck_minutes=0)
+    finally:
+        repair_db.save_settings({"delivered_auto": "1"})
+    assert len(zd.updates) == n and repair_db.get_rma(500)["delivered_at"] is not None
+
+
+@needs_db
+def test_new_tracking_number_resets_delivery(client, zd, tech, monkeypatch):
+    monkeypatch.setattr(portal_views, "DUPLICATE_WINDOW_SECONDS", 0)
+    _ship_ready(client, zd)
+    client.post("/t/500/stage/shipped", data={**SHIP_OK, "tracking_number": "1Z999AA10123456784"})
+    client.post("/t/500/delivery/mark", data={})
+    assert repair_db.get_rma(500)["delivered_at"] is not None
+    client.post("/t/500/stage/shipped", data={**SHIP_OK, "tracking_number": "1Z999AA10123456784"})
+    assert repair_db.get_rma(500)["delivered_at"] is not None  # same label: unchanged
+    client.post("/t/500/stage/shipped", data={**SHIP_OK, "tracking_number": "776543219876"})
+    rma = repair_db.get_rma(500)
+    assert rma["delivered_at"] is None and rma["return_carrier"] == "fedex"
+
+
+@needs_db
+def test_final_report_review_edit_and_send(client, zd, tech):
+    zd.custom_fields = ZD_RIFLE
+    _add(client)
+    client.post("/t/500/stage/received", data={**RECEIVED, "serial_number": "CA12345"})
+    trig = _choice("problem", "Trigger")
+    client.post("/t/500/stage/inspected", data={**inspected(), "problem_ids": [trig["id"]],
+                                                 "problem_notes": "SECRET internal note"})
+    sol = _choice("solution", "Adjusted trigger")
+    client.post("/t/500/stage/repaired", data={**repaired(), "solution_ids": [sol["id"]], "parts_used": "TRG-0042"})
+    queue = repair_db.final_report_queue()
+    assert [r["ticket_id"] for r in queue["in_progress"]] == [500] and queue["ready"] == []
+    client.post("/t/500/stage/tested", data=FINAL)
+    client.post("/t/500/stage/shipped", data={**SHIP_OK, "tracking_number": "1Z999AA10123456784"})
+    assert [r["ticket_id"] for r in repair_db.final_report_queue()["ready"]] == [500]
+    assert b"Final reports" in client.get("/final-reports").data
+
+    page = client.get("/t/500/final-report").data.decode()
+    assert "Serial number: CA12345" in page and "Parts replaced: TRG-0042" in page
+    assert "Ridgeline 6.5 Creedmoor" in page and "1Z999AA10123456784" in page
+    draft = page.split('class="report-editor"', 1)[1]
+    assert "SECRET" not in draft.split("</textarea>", 1)[0]  # internal notes stay out of the report
+
+    n = len(zd.updates)
+    edited = "Repair report for ticket #500\n\nAll fixed. Thanks for your patience with us."
+    client.post("/t/500/final-report/save", data={"op": "save", "body": edited})
+    assert repair_db.get_final_report(500)["body"] == edited and len(zd.updates) == n
+    preview = client.post("/t/500/final-report/preview", data={"body": edited}).get_json()
+    assert preview["ok"] and preview["posts"][0]["body"] == edited and len(zd.updates) == n
+    client.post("/t/500/final-report/send", data={"body": edited})
+    u = zd.updates[-1]
+    assert u["public"] and u["body"] == edited and "rp-final-report" in u["tags"]
+    client.post("/t/500/final-report/send", data={"body": edited})
+    assert len(zd.updates) == n + 1  # never twice
+    assert repair_db.final_report_queue()["sent"][0]["ticket_id"] == 500
+    assert repair_db.events_for(500)[0]["kind"] == "report"
+    # A corrected report can be sent after re-opening it.
+    client.post("/t/500/final-report/save", data={"op": "reopen"})
+    client.post("/t/500/final-report/send", data={"body": edited + " Correction."})
+    assert len(zd.updates) == n + 2
+
+
+@needs_db
+def test_final_report_rebuild_discards_edits(client, zd, tech):
+    _add(client)
+    sol = _choice("solution", "Adjusted trigger")
+    client.post("/t/500/stage/repaired", data={**repaired(), "solution_ids": [sol["id"]]})
+    client.post("/t/500/final-report/save", data={"op": "save", "body": "My own words for this report, edited."})
+    assert b"My own words" in client.get("/t/500/final-report").data
+    client.post("/t/500/final-report/save", data={"op": "rebuild"})
+    page = client.get("/t/500/final-report").data
+    assert b"My own words" not in page and b"Work performed: Adjusted trigger" in page
+
+
+@needs_db
+def test_report_and_csv_include_qc_fields(client, zd, tech):
+    zd.custom_fields = ZD_RIFLE
+    _ship_ready(client, zd)
+    resp = client.get("/report/")
+    assert b"Root causes" in resp.data and b"Arrived loaded" in resp.data
+    csv_text = client.get("/report/rmas.csv").data.decode("utf-8-sig")
+    header = csv_text.splitlines()[0]
+    for col in ("model", "caliber", "serial_number", "ticket_serial", "serial_match", "root_cause",
+                "function_check", "delivered_at", "zendesk_fields"):
+        assert col in header
+    assert "Ridgeline" in csv_text and "CA12345" in csv_text

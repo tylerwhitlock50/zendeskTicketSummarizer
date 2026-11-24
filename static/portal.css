@@ -949,3 +949,111 @@ button:disabled, .primary-btn:disabled, .action-btn:disabled, .small-btn:disable
 .email-text a { color: var(--brand); }
 .email-files { padding: 0 14px 14px; display: flex; flex-wrap: wrap; gap: 6px; }
 .email-files span { background: var(--canvas); border: 1px solid var(--line); border-radius: var(--radius); padding: 4px 8px; font-size: 14px; color: var(--ink-2); }
+
+/* ---------- QC pass: rifle details, verification, delivery, final reports ---------- */
+[hidden] { display: none !important; }
+.mono { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; letter-spacing: 0.02em; }
+.ok-tag, .bad-tag, .transit-tag {
+  display: inline-block;
+  font-family: var(--font-label);
+  font-weight: 600;
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 1px 6px;
+  margin-left: 4px;
+  border-radius: var(--radius);
+  white-space: nowrap;
+  vertical-align: 1px;
+}
+.ok-tag { background: var(--brand-tint); color: var(--brand); }
+.bad-tag { background: var(--accent); color: var(--accent-ink); }
+.transit-tag { background: var(--track); color: var(--ink-2); }
+
+.rifle-box {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0;
+  margin: 14px 0 0;
+  background: var(--surface);
+  border: 1px solid var(--line);
+}
+.rifle-box > div { padding: 8px 14px; border-right: 1px solid var(--line); min-width: 120px; }
+.rifle-box > div:last-child { border-right: 0; }
+.rifle-box dt {
+  font-family: var(--font-label);
+  font-weight: 600;
+  font-size: 12px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.rifle-box dd { margin: 2px 0 0; font-size: 16px; color: var(--ink); font-weight: 500; }
+.zd-fields { margin-top: 8px; font-size: 14px; }
+.zd-fields summary { cursor: pointer; color: var(--muted-2); }
+.zd-fields .record { margin-top: 8px; font-size: 14px; }
+
+.safety-row {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  padding: 10px 12px;
+  background: var(--accent-tint);
+  border-left: 4px solid var(--accent);
+}
+.verify-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; }
+.verify-msg {
+  font-family: var(--font-body);
+  font-size: 14px;
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--muted-2);
+  min-height: 20px;
+}
+.portal-main input.is-match { border-color: var(--brand); background: var(--brand-tint); }
+.portal-main input.is-mismatch { border-color: var(--accent); background: var(--accent-tint); }
+.portal-main input.is-match + .verify-msg { color: var(--brand); }
+.portal-main input.is-mismatch + .verify-msg { color: var(--danger); font-weight: 600; }
+.serial-confirm { background: var(--accent-tint); padding: 8px 10px; }
+.inline-select { max-width: 280px; }
+
+.delivery-status { font-size: 17px; font-weight: 600; margin: 0 0 6px; }
+.delivery-status.delivered { color: var(--brand); }
+.delivery-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-top: 10px; }
+.delivery-actions .mark-delivered { display: inline-flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.delivery-actions .check-line { display: inline-flex; align-items: center; gap: 8px; font-size: 15px; }
+
+.head-actions { display: inline-flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+.card-rifle { color: var(--ink-2); }
+
+.nav-count {
+  display: inline-block;
+  min-width: 20px;
+  padding: 0 6px;
+  margin-left: 4px;
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-size: 12px;
+  line-height: 20px;
+  text-align: center;
+  border-radius: var(--radius);
+}
+
+.final-layout { display: grid; grid-template-columns: minmax(0, 1.6fr) minmax(260px, 1fr); gap: 20px; align-items: start; }
+@media (max-width: 900px) { .final-layout { grid-template-columns: 1fr; } }
+.report-editor { width: 100%; font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-size: 14.5px; line-height: 1.5; }
+.report-text {
+  white-space: pre-wrap;
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: 14.5px;
+  background: var(--canvas);
+  border-left: 3px solid var(--brand);
+  padding: 12px 14px;
+}
+.final-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-top: 12px; }
+.final-actions .primary-btn { margin-left: auto; }
+.final-actions .link-btn { color: var(--muted-2); }
+.final-actions .link-btn:hover { color: var(--ink); }
+.record-aside .record { font-size: 15px; }
+.final-table td { vertical-align: middle; }
+.reset-row { display: flex; gap: 16px; flex-wrap: wrap; }
+.scan-results { margin-top: 20px; }

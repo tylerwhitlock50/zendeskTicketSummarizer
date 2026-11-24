@@ -37,12 +37,25 @@ app.register_blueprint(report_bp)
 app.before_request(auth.check_csrf)
 
 
+def _reports_waiting():
+    """How many final repair reports are ready to review (nav badge); 0 if unknown."""
+    if not db.available():
+        return 0
+    try:
+        import repair_db
+
+        return repair_db.final_reports_ready_count()
+    except Exception:  # never break a page over the badge
+        return 0
+
+
 @app.context_processor
 def _portal_context():
     return {
         "csrf_field": auth.csrf_field,
         "current_tech": auth.current_tech,
         "admin_locked": bool(auth.admin_password()),
+        "reports_waiting": _reports_waiting,
     }
 
 _dsn = os.environ.get("DATABASE_URL", "") or os.environ.get("RTM_DATABASE_URL", "")

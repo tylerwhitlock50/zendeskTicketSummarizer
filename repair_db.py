@@ -225,21 +225,29 @@ def _picked(kind: str) -> str:
     )
 
 
-CHOICE_KINDS = ("problem", "solution", "accessory", "inspection_point")
+CHOICE_KINDS = ("problem", "solution", "accessory", "inspection_point", "root_cause")
 
 _RMA_SELECT = (
-    f"SELECT r.*, {_picked('problem')}, {_picked('solution')}, {_picked('accessory')} "
-    "FROM repair.rma r "
+    f"SELECT r.*, {_picked('problem')}, {_picked('solution')}, {_picked('accessory')}, "
+    "(SELECT label FROM repair.choice WHERE id = r.root_cause_id) AS root_cause, "
+    "fr.sent_at AS report_sent_at, fr.body IS NOT NULL AS report_edited "
+    "FROM repair.rma r LEFT JOIN repair.final_report fr ON fr.ticket_id = r.ticket_id "
 )
 
 # Form columns a stage may write (everything else in ``fields`` is ignored).
 STAGE_COLUMNS = {
     "accessory_other", "arrival_damage", "arrival_notes",
-    "problem_other", "problem_notes", "inspection", "complaint_match",
-    "solution_other", "work_done",
+    "serial_number", "serial_match", "inbound_tracking", "inbound_match",
+    "model", "caliber", "part_number", "arrived_loaded",
+    "problem_other", "problem_notes", "inspection", "complaint_match", "trigger_pull_found", "headspace",
+    "solution_other", "work_done", "root_cause_id", "coverage", "parts_used", "trigger_pull_after",
     "test_required", "test_result", "group_size", "group_unit", "test_distance", "test_ammo",
-    "tracking_number", "flag",
+    "function_check",
+    "tracking_number", "ship_serial", "return_carrier", "ship_override", "flag",
 }
+
+# Copied from the Zendesk ticket (see update_snapshot).
+SNAPSHOT_COLUMNS = ("zd_serial", "zd_model", "zd_caliber", "zd_part_number", "zd_inbound_tracking")
 
 
 def get_rma(ticket_id: int) -> Optional[dict[str, Any]]:
@@ -264,6 +272,7 @@ def add_rma(
     requester_name: str | None,
     requester_email: str | None,
     tech: dict[str, Any],
+    snapshot: dict[str, Any] | None = None,
 ) -> bool:
     """Add a ticket to the queue. Returns False if it was already there."""
     with _conn() as conn:
@@ -275,12 +284,51 @@ def add_rma(
             ).fetchone()
             if not row:
                 return False
+            if snapshot:
+                _write_snapshot(conn, ticket_id, snapshot)
             conn.execute(
                 "INSERT INTO repair.event (ticket_id, kind, label, tech_id, tech_name) "
                 "VALUES (%s, 'added', 'Added to repair queue', %s, %s)",
                 (ticket_id, tech["id"], tech["name"]),
             )
     return True
+
+
+def _write_snapshot(conn: psycopg.Connection, ticket_id: int, snap: dict[str, Any]) -> None:
+    conn.execute(
+        "UPDATE repair.rma SET zd_serial = %s, zd_model = %s, zd_caliber = %s, zd_part_number = %s, "
+        "zd_inbound_tracking = %s, ticket_fields = %s WHERE ticket_id = %s",
+        (*(snap.get(c) for c in SNAPSHOT_COLUMNS), Jsonb(snap.get("ticket_fields") or []), ticket_id),
+    )
+
+
+def update_snapshot(ticket_id: int, snap: dict[str, Any]) -> None:
+    """Refresh the copy of the ticket's Zendesk fields (serial, model, tracking...)."""
+    with _conn() as conn:
+        _write_snapshot(conn, ticket_id, snap)
+
+
+def normalize_code(raw: str | None) -> str:
+    """Upper-case with spaces and dashes removed, for comparing scans."""
+    return "".join((raw or "").split()).replace("-", "").upper()
+
+
+def _norm_sql(col: str) -> str:
+    return f"upper(regexp_replace(COALESCE({col}, ''), '[[:space:]-]+', '', 'g'))"
+
+
+def find_by_code(code: str) -> list[dict[str, Any]]:
+    """RMAs whose serial or a tracking number matches a scan (spaces/dashes ignored)."""
+    norm = normalize_code(code)
+    if len(norm) < 4:
+        return []
+    cols = ("serial_number", "zd_serial", "ship_serial", "inbound_tracking", "zd_inbound_tracking",
+            "tracking_number")
+    where = " OR ".join(f"{_norm_sql('r.' + c)} = %s" for c in cols)
+    with _conn() as conn:
+        return conn.execute(
+            _RMA_SELECT + f"WHERE {where} ORDER BY r.added_at DESC LIMIT 20", [norm] * len(cols)
+        ).fetchall()
 
 
 @contextmanager
@@ -346,6 +394,15 @@ def record_stage(
             sets.append(f"{_STAGE_TS[later]} = NULL")
         if "tracking_number" not in cols:
             sets.append("tracking_number = NULL")
+    if moving_back or "tracking_number" in cols:
+        # A new shipment (or none): track it from scratch. Re-posting the same
+        # tracking number keeps what was already found.
+        for col in ("delivery_status", "delivery_detail", "delivery_checked_at", "delivered_at"):
+            if moving_back:
+                sets.append(f"{col} = NULL")
+            else:
+                sets.append(f"{col} = CASE WHEN tracking_number IS DISTINCT FROM %s THEN NULL ELSE {col} END")
+                params.append(cols["tracking_number"])
     for col, val in cols.items():
         sets.append(f"{col} = %s")
         params.append(Jsonb(val) if isinstance(val, (list, dict)) else val)
@@ -390,6 +447,165 @@ def record_stage(
             customer_message,
         ),
     )
+
+
+# ---------------------------------------------------------------- delivery
+
+
+def awaiting_delivery(recheck_minutes: int = 60, max_days: int = 30, limit: int = 200) -> list[dict[str, Any]]:
+    """Shipped RMAs not yet delivered, due for a tracking check (oldest check first)."""
+    with _conn() as conn:
+        return conn.execute(
+            _RMA_SELECT + "WHERE r.stage = 'shipped' AND r.delivered_at IS NULL "
+            "AND r.tracking_number IS NOT NULL "
+            "AND r.shipped_at > now() - make_interval(days => %s) "
+            "AND (r.delivery_checked_at IS NULL "
+            "     OR r.delivery_checked_at < now() - make_interval(mins => %s)) "
+            "ORDER BY r.delivery_checked_at NULLS FIRST, r.shipped_at LIMIT %s",
+            (max_days, recheck_minutes, limit),
+        ).fetchall()
+
+
+def set_delivery_status(ticket_id: int, status: str, detail: str | None) -> None:
+    with _conn() as conn:
+        conn.execute(
+            "UPDATE repair.rma SET delivery_status = %s, delivery_detail = %s, delivery_checked_at = now() "
+            "WHERE ticket_id = %s AND delivered_at IS NULL",
+            (status, (detail or "")[:300] or None, ticket_id),
+        )
+
+
+def record_delivered(
+    conn: psycopg.Connection,
+    ticket_id: int,
+    delivered_at,
+    detail: str | None,
+    tech: dict[str, Any] | None,
+    customer_message: str | None,
+    how: str,
+) -> None:
+    """Mark the return shipment delivered and log it (on the ticket_lock connection)."""
+    conn.execute(
+        "UPDATE repair.rma SET delivered_at = COALESCE(%s, now()), delivery_status = 'delivered', "
+        "delivery_detail = %s, delivery_checked_at = now(), updated_at = now() WHERE ticket_id = %s",
+        (delivered_at, (detail or "")[:300] or None, ticket_id),
+    )
+    event_detail = {"how": how}
+    if customer_message is None:
+        event_detail["not_emailed"] = True
+    conn.execute(
+        "INSERT INTO repair.event (ticket_id, kind, label, tech_id, tech_name, detail, customer_message) "
+        "VALUES (%s, 'delivery', 'Delivered', %s, %s, %s, %s)",
+        (ticket_id, tech["id"] if tech else None, tech["name"] if tech else "Tracking check",
+         Jsonb(event_detail), customer_message),
+    )
+
+
+def is_delivered(conn: psycopg.Connection, ticket_id: int) -> bool:
+    row = conn.execute("SELECT delivered_at FROM repair.rma WHERE ticket_id = %s", (ticket_id,)).fetchone()
+    return bool(row and row["delivered_at"])
+
+
+# ---------------------------------------------------------------- final reports
+
+
+REPORT_STAGES = ("repaired", "tested", "shipped")  # a repair report can be drafted from here on
+
+
+def final_report_queue(sent_days: int = 14) -> dict[str, list[dict[str, Any]]]:
+    """Reports to review: ready (shipped, not sent), in progress, and recently sent."""
+    with _conn() as conn:
+        rows = conn.execute(
+            _RMA_SELECT + "WHERE (r.stage = ANY(%s) AND fr.sent_at IS NULL) "
+            "   OR fr.sent_at > now() - make_interval(days => %s) "
+            "ORDER BY COALESCE(r.shipped_at, r.repaired_at, r.updated_at)",
+            (list(REPORT_STAGES), sent_days),
+        ).fetchall()
+    out: dict[str, list[dict[str, Any]]] = {"ready": [], "in_progress": [], "sent": []}
+    for r in rows:
+        if r["report_sent_at"]:
+            out["sent"].append(r)
+        elif r["stage"] == "shipped":
+            out["ready"].append(r)
+        else:
+            out["in_progress"].append(r)
+    out["sent"].sort(key=lambda r: r["report_sent_at"], reverse=True)
+    return out
+
+
+def final_reports_ready_count() -> int:
+    with _conn() as conn:
+        row = conn.execute(
+            "SELECT count(*) AS n FROM repair.rma r LEFT JOIN repair.final_report fr USING (ticket_id) "
+            "WHERE r.stage = 'shipped' AND fr.sent_at IS NULL"
+        ).fetchone()
+    return row["n"]
+
+
+def get_final_report(ticket_id: int) -> Optional[dict[str, Any]]:
+    with _conn() as conn:
+        return conn.execute(
+            "SELECT * FROM repair.final_report WHERE ticket_id = %s", (ticket_id,)
+        ).fetchone()
+
+
+def save_final_report(ticket_id: int, body: str | None, tech: dict[str, Any]) -> None:
+    """Save an edited draft (None goes back to the report built from the record)."""
+    with _conn() as conn:
+        conn.execute(
+            "INSERT INTO repair.final_report (ticket_id, body, edited_by, edited_at) "
+            "VALUES (%s, %s, %s, now()) ON CONFLICT (ticket_id) DO UPDATE "
+            "SET body = EXCLUDED.body, edited_by = EXCLUDED.edited_by, edited_at = now()",
+            (ticket_id, body, tech["name"]),
+        )
+
+
+def report_sent(conn: psycopg.Connection, ticket_id: int) -> bool:
+    row = conn.execute(
+        "SELECT sent_at FROM repair.final_report WHERE ticket_id = %s", (ticket_id,)
+    ).fetchone()
+    return bool(row and row["sent_at"])
+
+
+def record_report_sent(conn: psycopg.Connection, ticket_id: int, body: str, tech: dict[str, Any]) -> None:
+    conn.execute(
+        "INSERT INTO repair.final_report (ticket_id, sent_at, sent_by, sent_body) "
+        "VALUES (%s, now(), %s, %s) ON CONFLICT (ticket_id) DO UPDATE "
+        "SET sent_at = now(), sent_by = EXCLUDED.sent_by, sent_body = EXCLUDED.sent_body",
+        (ticket_id, tech["name"], body),
+    )
+    conn.execute(
+        "INSERT INTO repair.event (ticket_id, kind, label, tech_id, tech_name, customer_message) "
+        "VALUES (%s, 'report', 'Final repair report sent', %s, %s, %s)",
+        (ticket_id, tech["id"], tech["name"], body),
+    )
+    conn.execute("UPDATE repair.rma SET updated_at = now() WHERE ticket_id = %s", (ticket_id,))
+
+
+def reopen_final_report(ticket_id: int) -> None:
+    """Allow a corrected report to be sent again (keeps the draft)."""
+    with _conn() as conn:
+        conn.execute("UPDATE repair.final_report SET sent_at = NULL WHERE ticket_id = %s", (ticket_id,))
+
+
+# ---------------------------------------------------------------- settings
+
+
+def get_settings() -> dict[str, str]:
+    with _conn() as conn:
+        rows = conn.execute("SELECT key, value FROM repair.setting").fetchall()
+    return {r["key"]: r["value"] for r in rows if r["value"] is not None}
+
+
+def save_settings(values: dict[str, str | None]) -> None:
+    with _conn() as conn:
+        with conn.transaction():
+            for key, value in values.items():
+                conn.execute(
+                    "INSERT INTO repair.setting (key, value) VALUES (%s, %s) "
+                    "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()",
+                    (key, value),
+                )
 
 
 def set_flag(ticket_id: int, label: str | None) -> None:
@@ -539,6 +755,41 @@ def report(start, end) -> dict[str, Any]:
             f"FROM repair.rma WHERE {_local_date('received_at')} BETWEEN %s AND %s",
             rng,
         ).fetchone()
+        root_causes = conn.execute(
+            "SELECT COALESCE(c.label, '(not recorded)') AS label, count(*) AS n FROM repair.rma r "
+            "LEFT JOIN repair.choice c ON c.id = r.root_cause_id "
+            f"WHERE {_local_date('r.repaired_at')} BETWEEN %s AND %s GROUP BY 1 ORDER BY n DESC, label",
+            rng,
+        ).fetchall()
+        coverage = conn.execute(
+            "SELECT COALESCE(coverage, 'not_recorded') AS answer, count(*) AS n FROM repair.rma "
+            f"WHERE {_local_date('repaired_at')} BETWEEN %s AND %s GROUP BY 1",
+            rng,
+        ).fetchall()
+        qc = conn.execute(
+            "SELECT count(*) FILTER (WHERE serial_match IS FALSE) AS serial_mismatch, "
+            "  count(*) FILTER (WHERE inbound_match IS FALSE) AS inbound_mismatch, "
+            "  count(*) FILTER (WHERE arrived_loaded) AS arrived_loaded "
+            f"FROM repair.rma WHERE {_local_date('received_at')} BETWEEN %s AND %s",
+            rng,
+        ).fetchone()
+        final_checks = conn.execute(
+            "SELECT count(*) FILTER (WHERE function_check = 'pass') AS passed, "
+            "  count(*) FILTER (WHERE function_check = 'fail') AS failed "
+            f"FROM repair.rma WHERE {_local_date('tested_at')} BETWEEN %s AND %s",
+            rng,
+        ).fetchone()
+        deliveries = conn.execute(
+            "SELECT count(*) AS delivered, "
+            "  avg(EXTRACT(EPOCH FROM delivered_at - shipped_at)) / 86400 AS avg_transit_days "
+            f"FROM repair.rma WHERE {_local_date('delivered_at')} BETWEEN %s AND %s",
+            rng,
+        ).fetchone()
+        shipped_overrides = conn.execute(
+            "SELECT count(*) AS n FROM repair.rma WHERE ship_override "
+            f"AND {_local_date('shipped_at')} BETWEEN %s AND %s",
+            rng,
+        ).fetchone()
         by_tech = conn.execute(
             "SELECT COALESCE(tech_name, '(unknown)') AS tech, COALESCE(stage, kind) AS stage, "
             "count(*) AS n FROM repair.event "
@@ -563,6 +814,12 @@ def report(start, end) -> dict[str, Any]:
         "complaint": {r["answer"]: r["n"] for r in complaint},
         "point_issues": point_issues,
         "arrivals": arrivals,
+        "root_causes": root_causes,
+        "coverage": {r["answer"]: r["n"] for r in coverage},
+        "qc": qc,
+        "final_checks": final_checks,
+        "deliveries": deliveries,
+        "shipped_overrides": shipped_overrides["n"],
     }
 
 
@@ -575,11 +832,22 @@ def export_rmas(start, end) -> tuple[list[str], list[dict[str, Any]]]:
     with _conn() as conn:
         return _with_columns(conn.execute(
             "SELECT r.ticket_id, r.subject, r.requester_name, r.requester_email, r.stage, "
-            "r.added_by, r.added_at, r.received_at, r.inspected_at, r.repaired_at, r.shipped_at, "
-            "x.problem_summary AS problems, r.problem_notes, x.solution_summary AS solutions, "
-            "r.work_done, x.accessory_summary AS accessories, r.arrival_damage, r.arrival_notes, "
-            "r.complaint_match, r.tested_at, r.test_required, r.test_result, r.group_size, "
-            "r.group_unit, r.test_distance, r.test_ammo, r.tracking_number, r.flag "
+            "COALESCE(NULLIF(r.model, ''), r.zd_model) AS model, "
+            "COALESCE(NULLIF(r.caliber, ''), r.zd_caliber) AS caliber, "
+            "COALESCE(NULLIF(r.part_number, ''), r.zd_part_number) AS part_number, "
+            "COALESCE(NULLIF(r.serial_number, ''), r.zd_serial) AS serial_number, "
+            "r.zd_serial AS ticket_serial, r.serial_match, r.zd_model AS ticket_model, "
+            "r.zd_caliber AS ticket_caliber, r.zd_part_number AS ticket_part_number, "
+            "r.zd_inbound_tracking AS ticket_inbound_tracking, r.inbound_tracking, r.inbound_match, "
+            "r.added_by, r.added_at, r.received_at, r.inspected_at, r.repaired_at, r.tested_at, "
+            "r.shipped_at, r.delivered_at, "
+            "r.arrived_loaded, x.accessory_summary AS accessories, r.arrival_damage, r.arrival_notes, "
+            "r.complaint_match, x.problem_summary AS problems, r.problem_notes, r.trigger_pull_found, "
+            "r.headspace, x.root_cause, r.coverage, x.solution_summary AS solutions, r.work_done, "
+            "r.parts_used, r.trigger_pull_after, r.test_required, r.test_result, r.group_size, "
+            "r.group_unit, r.test_distance, r.test_ammo, r.function_check, r.ship_serial, "
+            "r.tracking_number, r.return_carrier, r.ship_override, r.delivery_status, r.flag, "
+            "x.report_sent_at AS final_report_sent_at, r.ticket_fields::text AS zendesk_fields "
             f"FROM repair.rma r JOIN ({_RMA_SELECT}) x ON x.ticket_id = r.ticket_id "
             f"WHERE {_local_date('r.added_at')} BETWEEN %s AND %s "
             f"   OR {_local_date('r.updated_at')} BETWEEN %s AND %s "

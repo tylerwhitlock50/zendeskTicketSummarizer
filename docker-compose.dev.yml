@@ -7,6 +7,12 @@ services:
     depends_on:
       - postgres
 
+  delivery-checker:
+    environment:
+      DATABASE_URL: postgresql://postgres:portal_dev@postgres:5432/portal_dev
+    depends_on:
+      - postgres
+
   postgres:
     image: postgres:16
     environment:

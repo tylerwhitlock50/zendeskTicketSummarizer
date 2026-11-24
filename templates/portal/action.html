@@ -54,7 +54,35 @@
   <p class="meta">
     <a href="{{ url_for('ticket_sheet', ticket_id=ticket.id) }}">Print sheet</a> &middot;
     <a href="{{ agent_url }}" target="_blank" rel="noopener">Open in Zendesk</a>
+    {% if rma and rma.stage in ('repaired', 'tested', 'shipped') %} &middot;
+    <a href="{{ url_for('portal.final_report', ticket_id=ticket.id) }}">Final report{% if rma.report_sent_at %} (sent){% endif %}</a>{% endif %}
+    &middot; <a href="{{ url_for('portal.scan') }}">Scan next</a>
   </p>
+  {% if not db_error %}
+  <dl class="rifle-box">
+    <div><dt>Model</dt><dd>{{ rifle.model or '—' }}</dd></div>
+    <div><dt>Caliber</dt><dd>{{ rifle.caliber or '—' }}</dd></div>
+    <div><dt>Serial</dt><dd class="mono">{{ rifle.serial or '—' }}
+      {% if rma and rma.serial_match is true %}<span class="ok-tag" title="Matches the ticket">verified</span>
+      {% elif rma and rma.serial_match is false %}<span class="bad-tag" title="Ticket says {{ rifle.ticket_serial }}">≠ ticket</span>
+      {% elif rifle.serial and not (rma and rma.serial_number) %}<span class="subtle">from ticket</span>{% endif %}</dd></div>
+    {% if rifle.part_number %}<div><dt>Part / SKU</dt><dd class="mono">{{ rifle.part_number }}</dd></div>{% endif %}
+    <div><dt>Inbound tracking</dt><dd class="mono">{% if rifle.inbound %}
+      {% set link = tracking_url(rifle.inbound) %}{% if link %}<a href="{{ link }}" target="_blank" rel="noopener noreferrer">{{ rifle.inbound }}</a>{% else %}{{ rifle.inbound }}{% endif %}
+      {% if rma and rma.inbound_match is false %}<span class="bad-tag" title="Ticket says {{ rifle.ticket_inbound }}">≠ ticket</span>{% endif %}
+      {% else %}—{% endif %}</dd></div>
+    {% if rma and rma.tracking_number %}<div><dt>Return tracking</dt><dd class="mono">
+      {% set link = tracking_url(rma.tracking_number, rma.return_carrier) %}{% if link %}<a href="{{ link }}" target="_blank" rel="noopener noreferrer">{{ rma.tracking_number }}</a>{% else %}{{ rma.tracking_number }}{% endif %}
+      {% if rma.delivered_at %}<span class="ok-tag">delivered {{ rma.delivered_at|localtime('%b %d') }}</span>
+      {% elif rma.delivery_status %}<span class="subtle">{{ status_words.get(rma.delivery_status, rma.delivery_status) }}</span>{% endif %}</dd></div>{% endif %}
+  </dl>
+  {% if rifle.fields %}
+  <details class="zd-fields">
+    <summary>All ticket fields from Zendesk ({{ rifle.fields|length }})</summary>
+    <dl class="record">{% for f in rifle.fields %}<dt>{{ f.title }}</dt><dd>{{ f.value }}</dd>{% endfor %}</dl>
+  </details>
+  {% endif %}
+  {% endif %}
   {% if complaint %}
   <details class="complaint" {% if rma and rma.stage in ('queued', 'received') %}open{% endif %}>
     <summary>Customer's complaint</summary>
@@ -102,7 +130,39 @@
           {{ csrf_field() }}
 
           {% if stage.key == 'received' %}
-            {{ attach('Photos of the rifle as it arrived') }}
+            <div class="safety-row">
+              <span class="field-label">Safety check: chamber and magazine</span>
+              <span class="seg">
+                <label class="seg-ok"><input type="radio" name="arrival_clear" value="clear" required
+                  {% if rma.arrived_loaded is false %}checked{% endif %}> Arrived unloaded</label>
+                <label class="seg-issue"><input type="radio" name="arrival_clear" value="loaded"
+                  {% if rma.arrived_loaded %}checked{% endif %}> Arrived loaded (now cleared)</label>
+              </span>
+            </div>
+            <div class="verify-grid">
+              <label>Serial number <span class="subtle">scan or type it from the rifle</span>
+                <input type="text" name="serial_number" value="{{ rma.serial_number or '' }}" required maxlength="40"
+                       autocomplete="off" autocapitalize="characters" spellcheck="false" class="mono"
+                       data-expect="{{ rma.zd_serial or '' }}" data-expect-label="the ticket">
+                <span class="verify-msg" aria-live="polite">{% if rma.zd_serial %}Ticket says <b class="mono">{{ rma.zd_serial }}</b>{% else %}No serial on the Zendesk ticket to check against{% endif %}</span>
+              </label>
+              <label>Inbound tracking <span class="subtle">scan the label on the box</span>
+                <input type="text" name="inbound_tracking" value="{{ rma.inbound_tracking or '' }}" maxlength="64"
+                       autocomplete="off" spellcheck="false" class="mono"
+                       data-expect="{{ rma.zd_inbound_tracking or '' }}" data-expect-label="the ticket" data-soft>
+                <span class="verify-msg" aria-live="polite">{% if rma.zd_inbound_tracking %}Ticket says <b class="mono">{{ rma.zd_inbound_tracking }}</b>{% else %}Optional{% endif %}</span>
+              </label>
+            </div>
+            <label class="check-line serial-confirm" hidden><input type="checkbox" name="serial_confirm" value="1">
+              Serial is different from the ticket: I re-checked the rifle. <span class="subtle">Saved as an internal note for CS; the customer is not emailed.</span></label>
+            <div class="inline-fields">
+              <label>Model <span class="subtle">as marked</span>
+                <input type="text" name="model" value="{{ rma.model or rma.zd_model or '' }}" required maxlength="120" autocomplete="off"></label>
+              <label>Caliber
+                <input type="text" name="caliber" value="{{ rma.caliber or rma.zd_caliber or '' }}" required maxlength="60" autocomplete="off"></label>
+              <label>Part no. / SKU <span class="subtle">optional</span>
+                <input type="text" name="part_number" value="{{ rma.part_number or rma.zd_part_number or '' }}" maxlength="60" autocomplete="off" class="mono"></label>
+            </div>
             {{ checklist('accessory', 'Items received with it', lists.accessory, rma.accessory_ids, rma.accessory_other, 'tick everything in the box') }}
             <div class="field-row">
               <span class="field-label">Any damage or shipping issues?</span>
@@ -111,6 +171,7 @@
             <label>Describe damage / shipping issues <span class="subtle">included in the customer email when Yes</span>
               <textarea name="arrival_notes" rows="2">{{ rma.arrival_notes or '' }}</textarea>
             </label>
+            {{ attach('Photos of the rifle and box as they arrived') }}
 
           {% elif stage.key == 'inspected' %}
             {% if complaint %}<blockquote class="complaint-quote"><span class="subtle">Customer says:</span> {{ complaint|truncate(400) }}</blockquote>{% endif %}
@@ -138,6 +199,20 @@
               </table>
             </fieldset>
             <div class="field-row">
+              <span class="field-label">Headspace <span class="subtle">GO / NO-GO gauges</span></span>
+              <span class="seg">
+                {% for val, word in (('pass', 'Pass'), ('fail', 'Fail'), ('not_checked', 'Not checked')) %}
+                <label class="seg-{{ {'pass': 'ok', 'fail': 'issue', 'not_checked': 'na'}[val] }}"><input type="radio" name="headspace" value="{{ val }}"
+                  {% if rma.headspace == val %}checked{% endif %} {% if loop.first %}required{% endif %}> {{ word }}</label>
+                {% endfor %}
+              </span>
+            </div>
+            <div class="inline-fields">
+              <label>Trigger pull as found <span class="subtle">lb, optional</span>
+                <input type="number" name="trigger_pull_found" step="0.05" min="0" max="15" inputmode="decimal"
+                       value="{{ rma.trigger_pull_found if rma.trigger_pull_found is not none else '' }}"></label>
+            </div>
+            <div class="field-row">
               <span class="field-label">Does it match the customer's complaint?</span>
               {{ yesno('complaint_match', rma.complaint_match, extra=('partly', 'Partly')) }}
             </div>
@@ -152,9 +227,44 @@
             <label>Work done <span class="subtle">sent to the customer</span>
               <textarea name="work_done" rows="2" placeholder="Blank uses the repairs ticked above">{{ rma.work_done or '' }}</textarea>
             </label>
+            <label>Parts replaced <span class="subtle">part numbers and qty, e.g. "TRG-0042 x1"; shown on the final report</span>
+              <input type="text" name="parts_used" value="{{ rma.parts_used or '' }}" maxlength="500" autocomplete="off"></label>
+            <fieldset class="checklist">
+              <legend>Root cause <span class="subtle">internal: pick one</span></legend>
+              <div class="check-grid">
+                {% for c in lists.root_cause %}
+                <label class="check-item"><input type="radio" name="root_cause_id" value="{{ c.id }}" {% if loop.first %}required{% endif %}
+                  {% if rma.root_cause_id == c.id %}checked{% endif %}> <span>{{ c.label }}</span></label>
+                {% else %}
+                <p class="empty">No root causes listed. Add them under Settings.</p>
+                {% endfor %}
+              </div>
+            </fieldset>
+            <div class="field-row">
+              <span class="field-label">Covered by <span class="subtle">internal</span></span>
+              <span class="seg">
+                {% for val, word in (('warranty', 'Warranty'), ('customer_pay', 'Customer pay'), ('goodwill', 'Goodwill')) %}
+                <label><input type="radio" name="coverage" value="{{ val }}" {% if rma.coverage == val %}checked{% endif %} {% if loop.first %}required{% endif %}> {{ word }}</label>
+                {% endfor %}
+              </span>
+            </div>
+            <div class="inline-fields">
+              <label>Trigger pull after <span class="subtle">lb, optional</span>
+                <input type="number" name="trigger_pull_after" step="0.05" min="0" max="15" inputmode="decimal"
+                       value="{{ rma.trigger_pull_after if rma.trigger_pull_after is not none else '' }}"></label>
+            </div>
             {{ attach() }}
 
           {% elif stage.key == 'tested' %}
+            <div class="field-row">
+              <span class="field-label">Final safety and function check <span class="subtle">safety, trigger, feed, extract, eject</span></span>
+              <span class="seg">
+                <label class="seg-ok"><input type="radio" name="function_check" value="pass" required {% if rma.function_check == 'pass' %}checked{% endif %}> Pass</label>
+                <label class="seg-issue"><input type="radio" name="function_check" value="fail" {% if rma.function_check == 'fail' %}checked{% endif %}> Fail</label>
+              </span>
+            </div>
+            <label class="function-notes">What failed? <span class="subtle">internal note</span>
+              <input type="text" name="function_notes" maxlength="300" autocomplete="off"></label>
             <div class="field-row">
               <span class="field-label">Accuracy test required?</span>
               {{ yesno('test_required', 'yes' if rma.test_required else ('no' if rma.test_required is false else None)) }}
@@ -180,21 +290,44 @@
               </div>
               <label>Ammunition used
                 <input type="text" name="test_ammo" value="{{ rma.test_ammo or '' }}" maxlength="120" placeholder="e.g. Hornady Precision Hunter 6.5 CM 143gr ELD-X"></label>
-              <p class="hint">A pass emails the customer. A fail is saved as an internal note and flags the rifle on the queue. "Not required" is recorded without emailing.</p>
             </div>
+            <p class="hint">A passed accuracy test emails the customer. Any fail is saved as an internal note and flags the rifle on the queue. With no accuracy test needed, the passed safety check is recorded without emailing.</p>
             {{ attach('Photo of the target') }}
 
           {% elif stage.key == 'shipped' %}
-            {% if rma.test_required and rma.test_result == 'fail' %}
-            <div class="notice warn">This rifle <strong>failed</strong> its accuracy test. Re-test it before shipping.</div>
+            {% if not final_check_ok %}
+            <div class="notice warn">
+              {% if rma.function_check == 'fail' %}This rifle <strong>failed</strong> its final safety / function check.
+              {% elif rma.test_required and rma.test_result == 'fail' %}This rifle <strong>failed</strong> its accuracy test.
+              {% else %}This rifle hasn't had its <strong>final safety / function check</strong>.{% endif %}
+              Post “{{ (stages|selectattr('key', 'equalto', 'tested')|map(attribute='label')|first) or 'Final test' }}” before shipping.</div>
             <label class="check-line"><input type="checkbox" name="ship_failed" value="1">
               Ship anyway (a manager approved shipping it as is)</label>
             {% endif %}
-            <label>Return tracking number
-              <input type="text" name="tracking_number" value="{{ rma.tracking_number or '' }}"
-                     autocomplete="off" required placeholder="Scan the label barcode">
-            </label>
-            {{ attach() }}
+            {% set expect_serial = rma.serial_number or rma.zd_serial %}
+            <div class="verify-grid">
+              <label>Serial on the rifle going in the box <span class="subtle">scan it</span>
+                <input type="text" name="ship_serial" value="" required maxlength="40" autocomplete="off"
+                       autocapitalize="characters" spellcheck="false" class="mono"
+                       data-expect="{{ expect_serial or '' }}" data-expect-label="this ticket's rifle">
+                <span class="verify-msg" aria-live="polite">{% if expect_serial %}Must match <b class="mono">{{ expect_serial }}</b>{% else %}No serial recorded yet{% endif %}</span>
+              </label>
+              <label>Return tracking number <span class="subtle">scan the label</span>
+                <input type="text" name="tracking_number" value="{{ rma.tracking_number or '' }}" class="mono"
+                       autocomplete="off" required spellcheck="false" data-carrier-detect>
+                <span class="verify-msg carrier-msg" aria-live="polite"></span>
+              </label>
+            </div>
+            <label class="inline-select">Carrier
+              <select name="return_carrier">
+                <option value="">Detect from the number</option>
+                {% for key, name in (('ups', 'UPS'), ('fedex', 'FedEx'), ('usps', 'USPS'), ('dhl', 'DHL')) %}
+                <option value="{{ key }}" {% if rma.return_carrier == key %}selected{% endif %}>{{ name }}</option>
+                {% endfor %}
+              </select></label>
+            <label class="check-line"><input type="checkbox" name="ship_unloaded" value="1" required>
+              Rifle is unloaded, and there is no ammunition in the box</label>
+            {{ attach('Photo of the rifle packed') }}
           {% endif %}
 
           <p class="message-preview"><span class="subtle">Customer message:</span> {{ stage.comment_body }}</p>
@@ -210,6 +343,37 @@
       </details>
       {% endfor %}
     </div>
+  </section>
+  {% endif %}
+
+  {% if rma and rma.stage == 'shipped' and rma.tracking_number %}
+  <section class="panel delivery-panel">
+    <h2>Delivery <span class="subtle">return shipment</span></h2>
+    {% set link = tracking_url(rma.tracking_number, rma.return_carrier) %}
+    {% if rma.delivered_at %}
+      <p class="delivery-status delivered">Delivered {{ rma.delivered_at|localtime }}{% if rma.delivery_detail %} <span class="subtle">· {{ rma.delivery_detail }}</span>{% endif %}</p>
+    {% else %}
+      <p class="delivery-status">
+        {{ status_words.get(rma.delivery_status or 'unknown') if rma.delivery_status else ('Not checked yet' if tracking_service else 'Not tracked automatically') }}
+        {% if rma.delivery_detail %}<span class="subtle">· {{ rma.delivery_detail }}</span>{% endif %}
+        {% if rma.delivery_checked_at %}<span class="subtle">· checked {{ rma.delivery_checked_at|localtime }}</span>{% endif %}
+      </p>
+      <p class="hint">{% if tracking_service %}Tracking is checked about every hour. When the carrier shows it delivered, the customer is emailed automatically{% else %}No tracking service is set up (<code>TRACKING_PROVIDER</code>), so check the carrier's page and mark it delivered here{% endif %}.</p>
+      <div class="delivery-actions">
+        {% if link %}<a class="secondary-btn" href="{{ link }}" target="_blank" rel="noopener noreferrer">Open {{ carrier_name(rma.return_carrier) }} tracking</a>{% endif %}
+        {% if tracking_service %}
+        <form method="post" action="{{ url_for('portal.check_delivery', ticket_id=ticket.id) }}" class="inline-form">
+          {{ csrf_field() }}<button type="submit" class="secondary-btn" {% if not tech %}disabled{% endif %}>Check now</button>
+        </form>
+        {% endif %}
+        <form method="post" action="{{ url_for('portal.mark_delivered', ticket_id=ticket.id) }}" class="inline-form mark-delivered"
+              data-preview="{{ url_for('portal.preview_delivered', ticket_id=ticket.id) }}">
+          {{ csrf_field() }}
+          <label class="check-line"><input type="checkbox" name="email" value="1" {% if not closed %}checked{% else %}disabled{% endif %}> Email the customer</label>
+          <button type="submit" class="primary-btn" {% if not tech %}disabled{% endif %}>Mark delivered</button>
+        </form>
+      </div>
+    {% endif %}
   </section>
   {% endif %}
 
@@ -276,18 +440,27 @@
     <h2>Repair record</h2>
     <dl class="record">
       <dt>Added</dt><dd>{{ rma.added_at|localtime }} by {{ rma.added_by or '—' }}</dd>
-      {% if rma.received_at %}<dt>Received with</dt><dd>{{ rma.accessory_summary or 'nothing listed' }}</dd>
+      {% if rma.received_at %}<dt>Safety check</dt><dd>{% if rma.arrived_loaded %}<strong>Arrived loaded</strong> (cleared){% elif rma.arrived_loaded is false %}Arrived unloaded{% else %}—{% endif %}</dd>
+        <dt>Serial</dt><dd class="mono">{{ rma.serial_number or '—' }}{% if rma.serial_match is false %} <strong class="bad-tag">ticket says {{ rma.zd_serial }}</strong>{% elif rma.serial_match %} <span class="ok-tag">matches ticket</span>{% endif %}</dd>
+        <dt>Received with</dt><dd>{{ rma.accessory_summary or 'nothing listed' }}</dd>
         <dt>On arrival</dt><dd>{% if rma.arrival_damage %}<strong>Damage noted:</strong> {{ rma.arrival_notes }}{% else %}No damage noted{% endif %}</dd>{% endif %}
       {% if rma.inspection %}<dt>Inspection</dt><dd>
         {% set issues = rma.inspection|selectattr('result', 'equalto', 'issue')|list %}
         {{ rma.inspection|length }} points, {{ issues|length }} with issues{% for p in issues %}<br>&bull; {{ p.label }}{% if p.note %}: {{ p.note }}{% endif %}{% endfor %}
         {% if rma.complaint_match %}<br>Matches complaint: {{ {'yes': 'Yes', 'partly': 'Partly', 'no': 'No'}[rma.complaint_match] }}{% endif %}</dd>{% endif %}
       {% if rma.problem_summary %}<dt>Problems</dt><dd>{{ rma.problem_summary }}{% if rma.problem_notes %} — {{ rma.problem_notes }}{% endif %}</dd>{% endif %}
+      {% if rma.headspace or rma.trigger_pull_found is not none %}<dt>Measured</dt><dd>
+        {% if rma.headspace %}Headspace: {{ {'pass': 'pass', 'fail': 'FAIL', 'not_checked': 'not checked'}[rma.headspace] }}{% endif %}
+        {% if rma.trigger_pull_found is not none %}{% if rma.headspace %} &middot; {% endif %}Trigger as found {{ '%g'|format(rma.trigger_pull_found|float) }} lb{% endif %}
+        {% if rma.trigger_pull_after is not none %} &middot; after {{ '%g'|format(rma.trigger_pull_after|float) }} lb{% endif %}</dd>{% endif %}
       {% if rma.solution_summary %}<dt>Repairs</dt><dd>{{ rma.solution_summary }}{% if rma.work_done %} — {{ rma.work_done }}{% endif %}</dd>{% endif %}
-      {% if rma.tested_at %}<dt>Accuracy test</dt><dd>
-        {% if rma.test_required is false %}Not required{% else %}
+      {% if rma.parts_used %}<dt>Parts</dt><dd>{{ rma.parts_used }}</dd>{% endif %}
+      {% if rma.root_cause or rma.coverage %}<dt>Root cause</dt><dd>{{ rma.root_cause or '—' }}{% if rma.coverage %} &middot; {{ {'warranty': 'Warranty', 'customer_pay': 'Customer pay', 'goodwill': 'Goodwill'}[rma.coverage] }}{% endif %}</dd>{% endif %}
+      {% if rma.tested_at %}<dt>Final test</dt><dd>
+        {% if rma.function_check %}Safety / function check {{ 'passed' if rma.function_check == 'pass' else 'FAILED' }}. {% endif %}
+        {% if rma.test_required is false %}Accuracy test not required{% elif rma.test_result %}
         {{ 'Passed' if rma.test_result == 'pass' else 'FAILED' }}: {{ '%g'|format(rma.group_size|float) }}{{ ' MOA' if rma.group_unit == 'moa' else '"' }} at {{ rma.test_distance }} yd, {{ rma.test_ammo }}{% endif %}</dd>{% endif %}
-      {% if rma.tracking_number %}<dt>Tracking</dt><dd>{{ rma.tracking_number }}</dd>{% endif %}
+      {% if rma.tracking_number %}<dt>Shipped</dt><dd><span class="mono">{{ rma.tracking_number }}</span> ({{ carrier_name(rma.return_carrier) }}){% if rma.ship_serial %}, serial <span class="mono">{{ rma.ship_serial }}</span> checked at pack-out{% endif %}{% if rma.ship_override %} <strong class="bad-tag">shipped without a passed final check</strong>{% endif %}{% if rma.delivered_at %}; delivered {{ rma.delivered_at|localtime }}{% endif %}</dd>{% endif %}
     </dl>
     <table class="history">
       {% for e in history %}
@@ -318,113 +491,8 @@
   </section>
   {% endif %}
 {% endif %}
-<dialog class="send-confirm" id="send-confirm" aria-labelledby="send-confirm-title"
-        data-to-name="{{ requester.name if requester and requester.name else '' }}"
-        data-to-email="{{ requester.email if requester and requester.email else '' }}"
-        data-subject="{{ ticket.subject or '' }}">
-  <div class="send-confirm-inner">
-    <header><h2 id="send-confirm-title">Check before sending</h2></header>
-    <div class="confirm-body" id="send-confirm-body"></div>
-    <footer>
-      <button type="button" class="secondary-btn" data-confirm-cancel>Cancel, keep editing</button>
-      <button type="button" class="primary-btn" data-confirm-ok>Approve and send</button>
-    </footer>
-  </div>
-</dialog>
+{% include 'portal/_confirm.html' %}
 <script>
-  // Confirm before sending: every stage, update button and note first shows
-  // exactly what will be posted (built by the server, so it matches), and is
-  // only sent once the tech taps Approve.
-  (function () {
-    var dialog = document.getElementById("send-confirm");
-    if (!dialog || !dialog.showModal) return;
-    var bodyBox = document.getElementById("send-confirm-body");
-    var okBtn = dialog.querySelector("[data-confirm-ok]");
-    var pending = null;  // {form, submitter}
-
-    function el(tag, cls, text) {
-      var n = document.createElement(tag);
-      if (cls) n.className = cls;
-      if (text != null) n.textContent = text;
-      return n;
-    }
-    // Plain text with line breaks kept and web links clickable, as in the email.
-    function textWithLinks(box, text) {
-      var re = /https?:\/\/[^\s<>"]+/g, last = 0, m;
-      while ((m = re.exec(text))) {
-        box.appendChild(document.createTextNode(text.slice(last, m.index)));
-        var a = el("a", null, m[0]); a.href = m[0]; a.target = "_blank"; a.rel = "noopener noreferrer";
-        box.appendChild(a); last = m.index + m[0].length;
-      }
-      box.appendChild(document.createTextNode(text.slice(last)));
-    }
-    function card(post, count, i) {
-      var c = el("div", "email-card " + (post.public ? "public" : "internal"));
-      var kind = post.public ? "Email to the customer" : "Internal note: staff only, the customer is not emailed";
-      if (count > 1) kind = "Post " + (i + 1) + " of " + count + ": " + kind;
-      c.appendChild(el("div", "email-kind", kind));
-      if (post.public) {
-        var meta = el("dl", "email-meta"), name = dialog.dataset.toName, email = dialog.dataset.toEmail;
-        meta.appendChild(el("dt", null, "To"));
-        meta.appendChild(el("dd", null, (name && email) ? name + " <" + email + ">" : (name || email || "The ticket's requester")));
-        meta.appendChild(el("dt", null, "Subject"));
-        meta.appendChild(el("dd", null, "Re: " + (dialog.dataset.subject || "your ticket")));
-        c.appendChild(meta);
-      }
-      var t = el("div", "email-text"); textWithLinks(t, post.body); c.appendChild(t);
-      if (post.files && post.files.length) {
-        var f = el("div", "email-files");
-        post.files.forEach(function (name) { f.appendChild(el("span", null, "📎 " + name)); });
-        c.appendChild(f);
-      }
-      return c;
-    }
-    function show(data) {
-      bodyBox.innerHTML = "";
-      document.getElementById("send-confirm-title").textContent = data.ok ? "Check before sending: " + data.title : "Can't send yet";
-      if (!data.ok) {
-        bodyBox.appendChild(el("p", "confirm-error", data.error || "Something went wrong."));
-        okBtn.hidden = true;
-      } else {
-        var anyPublic = data.posts.some(function (p) { return p.public; });
-        if (data.summary) bodyBox.appendChild(el("p", null, data.summary));
-        data.posts.forEach(function (p, i) { bodyBox.appendChild(card(p, data.posts.length, i)); });
-        okBtn.hidden = false;
-        okBtn.textContent = anyPublic ? "Approve and send to customer" : (data.posts.length ? "Approve and post internal note" : "Approve and save");
-      }
-      dialog.showModal();
-      (data.ok ? okBtn : dialog.querySelector("[data-confirm-cancel]")).focus();
-    }
-
-    document.querySelectorAll("form[data-preview]").forEach(function (form) {
-      form.addEventListener("submit", function (e) {
-        if (form.dataset.approved === "1") { form.dataset.approved = ""; return; }  // send it
-        e.preventDefault();
-        var submitter = e.submitter || null;
-        var fd = new FormData(form);
-        if (submitter && submitter.name) fd.set(submitter.name, submitter.value);
-        fd.delete("files");  // the preview needs only the file names, not the photos
-        form.querySelectorAll("input[type=file]").forEach(function (inp) {
-          Array.prototype.forEach.call(inp.files, function (f) { fd.append("file_names", f.name); });
-        });
-        pending = { form: form, submitter: submitter };
-        fetch(form.dataset.preview, { method: "POST", body: fd, credentials: "same-origin" })
-          .then(function (r) { return r.json(); })
-          .catch(function () { return { ok: false, error: "Couldn't build the preview (the portal didn't answer). Nothing was sent; try again." }; })
-          .then(show);
-      });
-    });
-    okBtn.addEventListener("click", function () {
-      if (!pending) return;
-      var p = pending; pending = null;
-      dialog.close();
-      p.form.dataset.approved = "1";
-      if (p.form.requestSubmit) p.form.requestSubmit(p.submitter || undefined);
-      else { if (p.submitter && p.submitter.name) { var h = document.createElement("input"); h.type = "hidden"; h.name = p.submitter.name; h.value = p.submitter.value; p.form.appendChild(h); } p.form.submit(); }
-    });
-    dialog.querySelector("[data-confirm-cancel]").addEventListener("click", function () { pending = null; dialog.close(); });
-    dialog.addEventListener("close", function () { pending = null; });
-  })();
   // Inspection: one tap marks every unanswered point OK (techs still change the ones with issues).
   document.querySelectorAll("[data-fill-ok]").forEach(function (btn) {
     btn.addEventListener("click", function () {
@@ -462,6 +530,61 @@
         if (missing.length) { e.preventDefault(); e.stopImmediatePropagation(); alert("Enter the " + missing.join(", ") + "."); }
       }
     }, true);
+  });
+  // Handheld scanners press Enter after every scan: in a stage form that moves
+  // to the next box instead of sending the form half filled in.
+  document.querySelectorAll("form.stage-form").forEach(function (form) {
+    form.addEventListener("keydown", function (e) {
+      var t = e.target;
+      if (e.key !== "Enter" || t.tagName !== "INPUT" || t.type === "submit" || t.type === "checkbox" || t.type === "radio") return;
+      e.preventDefault();
+      var boxes = Array.prototype.filter.call(form.querySelectorAll("input[type=text], input[type=number], input[type=url], textarea, select"),
+        function (b) { return b.offsetParent !== null && !b.disabled; });
+      var next = boxes[boxes.indexOf(t) + 1];
+      if (next) next.focus();
+    });
+  });
+  // Live check of a scanned serial / tracking number against what the ticket says.
+  var norm = function (v) { return (v || "").replace(/[\s-]+/g, "").toUpperCase(); };
+  document.querySelectorAll("input[data-expect]").forEach(function (inp) {
+    var msg = inp.parentNode.querySelector(".verify-msg"), want = inp.getAttribute("data-expect");
+    var original = msg ? msg.innerHTML : "";
+    var confirm = inp.name === "serial_number" ? inp.form.querySelector(".serial-confirm") : null;
+    function sync() {
+      var v = norm(inp.value), bad = false;
+      inp.classList.remove("is-match", "is-mismatch");
+      if (!want || !v) { if (msg) msg.innerHTML = original; }
+      else if (v === norm(want)) { inp.classList.add("is-match"); if (msg) msg.textContent = "✓ Matches " + inp.getAttribute("data-expect-label"); }
+      else {
+        bad = true; inp.classList.add("is-mismatch");
+        if (msg) msg.textContent = (inp.hasAttribute("data-soft") ? "Different from " : "✗ Does not match ") + inp.getAttribute("data-expect-label") + " (" + want + ")";
+      }
+      if (confirm) confirm.hidden = !bad;
+    }
+    inp.addEventListener("input", sync); sync();
+  });
+  // Show which carrier a return tracking number belongs to.
+  document.querySelectorAll("input[data-carrier-detect]").forEach(function (inp) {
+    var msg = inp.parentNode.querySelector(".carrier-msg");
+    function guess(v) {
+      v = norm(v);
+      if (/^1Z[0-9A-Z]{16}$/.test(v) || /^[TK]\d{10}$/.test(v)) return "UPS";
+      if (/^(94|93|92|95|82)\d{18,24}$/.test(v) || /^[A-Z]{2}\d{9}US$/.test(v)) return "USPS";
+      if (/^(\d{12}|\d{15}|\d{20}|\d{22})$/.test(v)) return "FedEx";
+      if (/^\d{10}$/.test(v)) return "DHL";
+      return v ? "Carrier not recognised: pick it below" : "";
+    }
+    function sync() { if (msg) msg.textContent = guess(inp.value); }
+    inp.addEventListener("input", sync); sync();
+  });
+  // Final check: ask what failed only on a fail.
+  document.querySelectorAll("input[name=function_check]").forEach(function (r) {
+    function sync() {
+      var form = r.closest("form"), box = form.querySelector(".function-notes");
+      var picked = form.querySelector("input[name=function_check]:checked");
+      if (box) box.hidden = !(picked && picked.value === "fail");
+    }
+    r.addEventListener("change", sync); sync();
   });
   // Accuracy test: hide the result fields when no test is required.
   document.querySelectorAll("input[name=test_required]").forEach(function (r) {
