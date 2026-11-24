@@ -865,3 +865,98 @@ def export_events(start, end) -> tuple[list[str], list[dict[str, Any]]]:
             f"WHERE {_local_date('e.created_at')} BETWEEN %s AND %s ORDER BY e.created_at, e.id",
             (start, end),
         ))
+
+
+AGE_BUCKETS = ((0, 2, "0–2 days"), (3, 7, "3–7 days"), (8, 14, "8–14 days"),
+               (15, 30, "15–30 days"), (31, None, "Over 30 days"))
+TURNAROUND_BUCKETS = ((0, 3, "0–3"), (4, 7, "4–7"), (8, 14, "8–14"), (15, 21, "15–21"),
+                      (22, 30, "22–30"), (31, 45, "31–45"), (46, None, "46+"))
+
+
+def _bucket(days: float, buckets) -> int:
+    d = int(days)
+    for i, (lo, hi, _label) in enumerate(buckets):
+        if d >= lo and (hi is None or d <= hi):
+            return i
+    return 0
+
+
+def report_charts(start, end) -> dict[str, Any]:
+    """Series for the report's charts, for local dates start..end inclusive.
+
+    daily:   events per local day and stage (every day in range, zeros filled)
+    aging:   open RMAs by current stage and days in that stage
+    shipped: per-RMA days for those shipped in range (turnaround spread)
+    previous: the same headline counts for the period just before, for deltas
+    """
+    from datetime import timedelta
+
+    days = (end - start).days + 1
+    prev_start, prev_end = start - timedelta(days=days), start - timedelta(days=1)
+    with _conn() as conn:
+        daily_rows = conn.execute(
+            f"SELECT {_local_date('created_at')} AS day, COALESCE(stage, kind) AS stage, count(*) AS n "
+            "FROM repair.event WHERE kind IN ('added', 'stage') "
+            f"AND {_local_date('created_at')} BETWEEN %s AND %s GROUP BY 1, 2",
+            (start, end),
+        ).fetchall()
+        open_rows = conn.execute(
+            "SELECT stage, EXTRACT(EPOCH FROM now() - COALESCE("
+            "  CASE stage WHEN 'received' THEN received_at WHEN 'inspected' THEN inspected_at "
+            "    WHEN 'repaired' THEN repaired_at WHEN 'tested' THEN tested_at END, added_at)) / 86400 AS days "
+            "FROM repair.rma WHERE stage <> 'shipped'"
+        ).fetchall()
+        shipped_rows = conn.execute(
+            "SELECT EXTRACT(EPOCH FROM shipped_at - added_at) / 86400 AS total_days, "
+            "  EXTRACT(EPOCH FROM shipped_at - received_at) / 86400 AS shop_days "
+            "FROM repair.rma WHERE stage = 'shipped' "
+            f"AND {_local_date('shipped_at')} BETWEEN %s AND %s",
+            (start, end),
+        ).fetchall()
+        prev_counts = conn.execute(
+            "SELECT COALESCE(stage, kind) AS stage, count(*) AS n FROM repair.event "
+            f"WHERE kind IN ('added', 'stage') AND {_local_date('created_at')} BETWEEN %s AND %s "
+            "GROUP BY 1",
+            (prev_start, prev_end),
+        ).fetchall()
+        prev_turn = conn.execute(
+            "SELECT avg(EXTRACT(EPOCH FROM shipped_at - received_at)) / 86400 AS avg_shop_days "
+            "FROM repair.rma WHERE stage = 'shipped' "
+            f"AND {_local_date('shipped_at')} BETWEEN %s AND %s",
+            (prev_start, prev_end),
+        ).fetchone()
+
+    labels = [(start + timedelta(days=i)).isoformat() for i in range(days)]
+    index = {d: i for i, d in enumerate(labels)}
+    daily: dict[str, list[int]] = {k: [0] * days for k in ("added",) + STAGE_KEYS}
+    for r in daily_rows:
+        if r["stage"] in daily:
+            daily[r["stage"]][index[r["day"].isoformat()]] = r["n"]
+
+    aging = {k: [0] * len(AGE_BUCKETS) for k in BOARD_STAGES if k != "shipped"}
+    for r in open_rows:
+        if r["stage"] in aging:
+            aging[r["stage"]][_bucket(float(r["days"] or 0), AGE_BUCKETS)] += 1
+
+    spread = {"total": [0] * len(TURNAROUND_BUCKETS), "shop": [0] * len(TURNAROUND_BUCKETS)}
+    for r in shipped_rows:
+        if r["total_days"] is not None:
+            spread["total"][_bucket(float(r["total_days"]), TURNAROUND_BUCKETS)] += 1
+        if r["shop_days"] is not None:
+            spread["shop"][_bucket(float(r["shop_days"]), TURNAROUND_BUCKETS)] += 1
+
+    prev_avg = prev_turn["avg_shop_days"] if prev_turn else None
+    return {
+        "days": labels,
+        "daily": daily,
+        "age_buckets": [b[2] for b in AGE_BUCKETS],
+        "aging": aging,
+        "turnaround_buckets": [b[2] for b in TURNAROUND_BUCKETS],
+        "spread": spread,
+        "previous": {
+            "start": prev_start.isoformat(),
+            "end": prev_end.isoformat(),
+            "counts": {r["stage"]: r["n"] for r in prev_counts},
+            "avg_shop_days": float(prev_avg) if prev_avg is not None else None,
+        },
+    }

@@ -53,6 +53,7 @@
   </p>
   <p class="meta">
     <a href="{{ url_for('ticket_sheet', ticket_id=ticket.id) }}">Print sheet</a> &middot;
+    {% if rma %}<a href="{{ url_for('portal.repair_report', ticket_id=ticket.id) }}">Repair report (PDF)</a> &middot;{% endif %}
     <a href="{{ agent_url }}" target="_blank" rel="noopener">Open in Zendesk</a>
     {% if rma and rma.stage in ('repaired', 'tested', 'shipped') %} &middot;
     <a href="{{ url_for('portal.final_report', ticket_id=ticket.id) }}">Final report{% if rma.report_sent_at %} (sent){% endif %}</a>{% endif %}
@@ -437,7 +438,8 @@
 
   {% if rma %}
   <section class="panel">
-    <h2>Repair record</h2>
+    <h2>Repair record
+      <a class="link-btn small right" href="{{ url_for('portal.repair_report', ticket_id=ticket.id) }}">Print repair report</a></h2>
     <dl class="record">
       <dt>Added</dt><dd>{{ rma.added_at|localtime }} by {{ rma.added_by or '—' }}</dd>
       {% if rma.received_at %}<dt>Safety check</dt><dd>{% if rma.arrived_loaded %}<strong>Arrived loaded</strong> (cleared){% elif rma.arrived_loaded is false %}Arrived unloaded{% else %}—{% endif %}</dd>

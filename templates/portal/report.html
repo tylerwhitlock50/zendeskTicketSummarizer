@@ -1,17 +1,24 @@
 {% extends "portal/base.html" %}
 {% block title %}Repair report{% endblock %}
+{% block main_class %}wide{% endblock %}
 {% block content %}
 <div class="page-head">
   <h1>Repair report</h1>
   <span class="range-nav">
-    <a href="{{ url_for('report.weekly', start=prev_start, end=prev_end) }}">&larr; Previous week</a>
-    <a href="{{ url_for('report.weekly', start=next_start, end=next_end) }}">Next week &rarr;</a>
+    <a href="{{ url_for('report.weekly', start=prev_start, end=prev_end) }}">&larr; Previous period</a>
+    <a href="{{ url_for('report.weekly', start=next_start, end=next_end) }}">Next period &rarr;</a>
   </span>
 </div>
 <form method="get" class="range-form">
   <label>From <input type="date" name="start" value="{{ start }}"></label>
   <label>To <input type="date" name="end" value="{{ end }}"></label>
   <button type="submit">Show</button>
+  <span class="range-presets">
+    {% for label, p_start, p_end in presets %}
+    <a href="{{ url_for('report.weekly', start=p_start, end=p_end) }}"
+       class="{{ 'active' if p_start == start and p_end == end }}">{{ label }}</a>
+    {% endfor %}
+  </span>
   <span class="downloads">
     Download:
     <a href="{{ url_for('report.rmas_csv', start=start, end=end) }}">RMAs (CSV)</a> &middot;
@@ -23,6 +30,161 @@
 <div class="notice warn">Database not configured. Set <code>DATABASE_URL</code> and run migrations.</div>
 {% else %}
 {% set t = data.turnaround %}
+{% set prev = charts.previous %}
+{% macro delta(now, before, unit='', lower_is_better=false) -%}
+  {%- if before is none or now is none -%}<span class="kpi-delta">no earlier data</span>
+  {%- else -%}
+    {%- set d = now - before -%}
+    <span class="kpi-delta">
+      {%- if d|abs < 0.05 %}same as previous period
+      {%- else %}{{ '▲' if d > 0 else '▼' }} {{ ('%.1f'|format(d|abs)) if unit else (d|abs|int) }}{{ unit }} vs previous period{% endif -%}
+    </span>
+  {%- endif -%}
+{%- endmacro %}
+
+<div class="kpi-row">
+  <div class="kpi">
+    <span class="kpi-label">Added to queue</span>
+    <span class="kpi-value">{{ data.stage_counts.get('added', 0) }}</span>
+    {{ delta(data.stage_counts.get('added', 0), prev.counts.get('added', 0)) }}
+  </div>
+  <div class="kpi">
+    <span class="kpi-label">{{ stages.received }}</span>
+    <span class="kpi-value">{{ data.stage_counts.get('received', 0) }}</span>
+    {{ delta(data.stage_counts.get('received', 0), prev.counts.get('received', 0)) }}
+  </div>
+  <div class="kpi">
+    <span class="kpi-label">{{ stages.shipped }}</span>
+    <span class="kpi-value">{{ data.stage_counts.get('shipped', 0) }}</span>
+    {{ delta(data.stage_counts.get('shipped', 0), prev.counts.get('shipped', 0)) }}
+  </div>
+  <div class="kpi">
+    <span class="kpi-label">Avg. received to shipped</span>
+    <span class="kpi-value">{{ '%.1f'|format(t.avg_shop_days) if t.avg_shop_days is not none else '—' }}<small> days</small></span>
+    {{ delta(t.avg_shop_days|float if t.avg_shop_days is not none else none, prev.avg_shop_days, ' days') }}
+  </div>
+  <div class="kpi">
+    <span class="kpi-label">Open now</span>
+    <span class="kpi-value">{{ data.open_by_stage.values()|sum }}</span>
+    <span class="kpi-delta">{{ data.open_by_stage.get('queued', 0) }} not yet received</span>
+  </div>
+</div>
+
+<section class="chart-card chart-wide">
+  <header class="chart-head">
+    <div>
+      <h2>Activity</h2>
+      <p class="chart-sub">Scans from {{ start }} to {{ end }}. Click a stage in the key to show or hide it; click a point to zoom the report to that day or week.</p>
+    </div>
+    <div class="chart-controls">
+      <div class="seg" role="group" aria-label="Group by">
+        <button type="button" data-grain="day">Day</button>
+        <button type="button" data-grain="week">Week</button>
+      </div>
+      <div class="seg" role="group" aria-label="Chart style">
+        <button type="button" data-style="line">Lines</button>
+        <button type="button" data-style="bar">Bars</button>
+      </div>
+    </div>
+  </header>
+  <div class="chart-box tall"><canvas id="chart-activity" aria-label="Scans over time by stage" role="img"></canvas></div>
+</section>
+
+<div class="chart-grid">
+  <section class="chart-card">
+    <header class="chart-head">
+      <div>
+        <h2>Where the time goes</h2>
+        <p class="chart-sub">Average days per step, for the {{ t.shipped }} shipped this period.</p>
+      </div>
+    </header>
+    <div class="chart-box"><canvas id="chart-steps" aria-label="Average days per repair step" role="img"></canvas></div>
+  </section>
+
+  <section class="chart-card">
+    <header class="chart-head">
+      <div>
+        <h2>Turnaround spread</h2>
+        <p class="chart-sub">How many shipped RMAs took how long, in days.</p>
+      </div>
+      <div class="chart-controls">
+        <div class="seg" role="group" aria-label="Measure">
+          <button type="button" data-spread="shop">Received → shipped</button>
+          <button type="button" data-spread="total">Added → shipped</button>
+        </div>
+      </div>
+    </header>
+    <div class="chart-box"><canvas id="chart-spread" aria-label="Turnaround distribution" role="img"></canvas></div>
+  </section>
+
+  <section class="chart-card">
+    <header class="chart-head">
+      <div>
+        <h2>Open now, by how long in stage</h2>
+        <p class="chart-sub">Every open RMA, by its current stage. Click a bar to open the queue.</p>
+      </div>
+    </header>
+    <div class="chart-box"><canvas id="chart-aging" aria-label="Open RMAs by stage and age" role="img"></canvas></div>
+  </section>
+
+  <section class="chart-card">
+    <header class="chart-head">
+      <div>
+        <h2>Work by person</h2>
+        <p class="chart-sub">Scans each person posted this period, by stage.</p>
+      </div>
+    </header>
+    <div class="chart-box" id="box-techs"><canvas id="chart-techs" aria-label="Scans by person and stage" role="img"></canvas></div>
+  </section>
+
+  <section class="chart-card">
+    <header class="chart-head">
+      <div>
+        <h2>Problems found</h2>
+        <p class="chart-sub">At inspection. An RMA with two problems counts under both.</p>
+      </div>
+      <button type="button" class="link-btn show-all" data-target="problems" hidden>Show all</button>
+    </header>
+    <div class="chart-box" id="box-problems"><canvas id="chart-problems" aria-label="Problems found" role="img"></canvas></div>
+  </section>
+
+  <section class="chart-card">
+    <header class="chart-head">
+      <div>
+        <h2>Repairs done</h2>
+        <p class="chart-sub">At repair complete.</p>
+      </div>
+      <button type="button" class="link-btn show-all" data-target="solutions" hidden>Show all</button>
+    </header>
+    <div class="chart-box" id="box-solutions"><canvas id="chart-solutions" aria-label="Repairs done" role="img"></canvas></div>
+  </section>
+
+  <section class="chart-card">
+    <header class="chart-head">
+      <div>
+        <h2>Inspection points with issues</h2>
+        <p class="chart-sub">Checklist points marked as an issue.</p>
+      </div>
+      <button type="button" class="link-btn show-all" data-target="points" hidden>Show all</button>
+    </header>
+    <div class="chart-box" id="box-points"><canvas id="chart-points" aria-label="Inspection points with issues" role="img"></canvas></div>
+  </section>
+
+  {% set acc = data.accuracy %}
+  <section class="chart-card">
+    <header class="chart-head">
+      <div>
+        <h2>Accuracy tests &amp; quality checks</h2>
+        <p class="chart-sub">{{ acc.tested }} tested{% if acc.avg_moa is not none %}, average passing group {{ '%.2f'|format(acc.avg_moa|float) }} MOA{% endif %}{% if acc.avg_in is not none %}, average passing group {{ '%.2f'|format(acc.avg_in|float) }}"{% endif %}.</p>
+      </div>
+    </header>
+    <div class="chart-box"><canvas id="chart-quality" aria-label="Accuracy test and inspection results" role="img"></canvas></div>
+  </section>
+</div>
+
+<details class="all-numbers">
+  <summary>All numbers as tables</summary>
+
 <div class="report-counts">
   <div class="count-card">
     <h2>This period</h2>
@@ -71,7 +233,6 @@
   </div>
 </div>
 
-{% set acc = data.accuracy %}
 <div class="report-counts">
   <div class="count-card">
     <h2>Accuracy tests</h2>
@@ -132,6 +293,7 @@
     </table>
   </div>
 </div>
+</details>
 
 <h2 class="section-head">By person</h2>
 <table class="report-table">
@@ -154,5 +316,29 @@
     {% endfor %}
   </tbody>
 </table>
+
+{% set payload = {
+  "stages": stages,
+  "stage_keys": board_stages[1:],
+  "charts": charts,
+  "turnaround": {
+    "wait": (t.avg_total_days - t.avg_shop_days)|float if t.avg_total_days is not none and t.avg_shop_days is not none else none,
+    "inspect": t.avg_to_inspect_days|float if t.avg_to_inspect_days is not none else none,
+    "repair": t.avg_repair_days|float if t.avg_repair_days is not none else none,
+    "ship": t.avg_to_ship_days|float if t.avg_to_ship_days is not none else none,
+  },
+  "problems": data.problems,
+  "solutions": data.solutions,
+  "points": data.point_issues,
+  "techs": data.techs,
+  "accuracy": {"passed": acc.passed, "failed": acc.failed, "not_required": acc.not_required},
+  "complaint": data.complaint,
+  "arrivals": data.arrivals,
+  "report_url": url_for('report.weekly'),
+  "queue_url": url_for('portal.queue'),
+} %}
+<script type="application/json" id="report-data">{{ payload|tojson }}</script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.6/dist/chart.umd.min.js"></script>
+<script src="{{ url_for('static', filename='report.js') }}"></script>
 {% endif %}
 {% endblock %}

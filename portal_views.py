@@ -10,6 +10,7 @@ customer. The shop-side record (who, when, what was found) is saved in the
 import logging
 import os
 import re
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 from flask import Blueprint, Response, abort, flash, redirect, render_template, request, url_for
@@ -395,6 +396,41 @@ def _final_check_ok(rma):
     if rma.get("function_check") != "pass":
         return False
     return not (rma.get("test_required") and rma.get("test_result") != "pass")
+@portal_bp.route("/t/<int:ticket_id>/report")
+def repair_report(ticket_id):
+    """Printable repair report: every stage form, cleaned up, one page to print or save as PDF.
+
+    Written for the customer: internal-only fields (inspection notes) are left out.
+    """
+    if not db.available():
+        return render_template("error.html", ticket_id=ticket_id, message="Database not configured."), 503
+    rma = repair_db.get_rma(ticket_id)
+    if not rma:
+        flash(f"Ticket #{ticket_id} isn't in the repair queue, so there's no repair report yet.", "error")
+        return _back(ticket_id)
+    try:
+        ticket, requester, _org = _get_zendesk().get_ticket(ticket_id)
+    except ZendeskError as exc:
+        status = 404 if exc.status == 404 else 502
+        return render_template("error.html", ticket_id=ticket_id, message=str(exc)), status
+
+    history = repair_db.events_for(ticket_id)
+    stage_by = {}
+    for e in reversed(history):  # who last posted each stage
+        if e["kind"] == "stage":
+            stage_by[e["stage"]] = e["tech_name"]
+    return render_template(
+        "portal/repair_report.html",
+        ticket=ticket,
+        requester=requester,
+        complaint=(ticket.get("description") or "").strip(),
+        rma=rma,
+        stages=repair_db.list_stages(),
+        stage_by=stage_by,
+        issues=[p for p in (rma.get("inspection") or []) if p.get("result") == "issue"],
+        rifle=_rifle(rma, None),
+        now=datetime.now(timezone.utc),
+    )
 
 
 def _next_stage(current):

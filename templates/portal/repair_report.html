@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Repair report — Ticket #{{ ticket.id }}</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Barlow+Semi+Condensed:wght@500;600&family=Barlow:wght@400;500;600;700&display=swap">
+  <link rel="stylesheet" href="{{ url_for('static', filename='theme.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='print.css') }}">
+</head>
+<body class="sheet-page">
+  {% set label_of = {} %}{% for s in stages %}{% set _ = label_of.update({s.key: s.label}) %}{% endfor %}
+  {% set current_label = label_of.get(rma.stage, 'Waiting to receive') %}
+  <div class="toolbar no-print">
+    <a href="{{ url_for('portal.action_page', ticket_id=ticket.id) }}">&larr; Back to ticket</a>
+    <button onclick="window.print()">Print / Save as PDF</button>
+  </div>
+
+  <article class="sheet report">
+    <header class="report-head">
+      <div class="report-eyebrow">Repair service report</div>
+      <div class="report-title-row">
+        <h1>{{ ticket.subject or rma.subject or 'Repair' }}</h1>
+        <div class="report-ref">
+          <span>Ticket</span><strong>#{{ ticket.id }}</strong>
+        </div>
+      </div>
+      <dl class="report-facts">
+        <div><dt>Customer</dt><dd>{{ (requester.name if requester else rma.requester_name) or '—' }}</dd></div>
+        <div><dt>Email</dt><dd>{{ (requester.email if requester else rma.requester_email) or '—' }}</dd></div>
+        <div><dt>Status</dt><dd>{{ current_label }}{% if rma.flag %} &middot; {{ rma.flag }}{% endif %}</dd></div>
+        <div><dt>Report date</dt><dd>{{ now|localtime('%b %d, %Y') }}</dd></div>
+        {% if rifle.model or rifle.caliber %}<div><dt>Rifle</dt><dd>{{ [rifle.model, rifle.caliber]|select|join(' · ') }}</dd></div>{% endif %}
+        {% if rifle.serial %}<div><dt>Serial</dt><dd class="mono">{{ rifle.serial }}</dd></div>{% endif %}
+      </dl>
+    </header>
+
+    <ol class="report-steps">
+      {% for s in stages %}
+      {% set at = rma[s.key ~ '_at'] %}
+      <li class="{{ 'done' if at else 'todo' }}">
+        <span class="step-name">{{ s.label }}</span>
+        <span class="step-when">{% if at %}{{ at|localtime('%b %d') }}{% if stage_by.get(s.key) %} &middot; {{ stage_by[s.key]|initials }}{% endif %}{% else %}—{% endif %}</span>
+      </li>
+      {% endfor %}
+    </ol>
+
+    {% if complaint %}
+    <section class="report-section">
+      <h2>Reported concern</h2>
+      <p class="report-quote">{{ complaint|truncate(900) }}</p>
+    </section>
+    {% endif %}
+
+    <section class="report-section">
+      <h2><span class="num">1</span> Received</h2>
+      {% if rma.received_at %}
+      <dl class="report-dl">
+        <dt>Date</dt><dd>{{ rma.received_at|localtime('%b %d, %Y') }}</dd>
+        <dt>Items received</dt><dd>{{ rma.accessory_summary or 'Rifle only, no accessories listed' }}</dd>
+        <dt>Condition on arrival</dt>
+        <dd>{% if rma.arrival_damage %}<strong>Damage or shipping issue noted.</strong> {{ rma.arrival_notes or '' }}{% else %}No damage noted{% endif %}</dd>
+      </dl>
+      {% else %}<p class="empty">Not received yet.</p>{% endif %}
+    </section>
+
+    <section class="report-section">
+      <h2><span class="num">2</span> Inspection</h2>
+      {% if rma.inspected_at %}
+      <dl class="report-dl">
+        <dt>Date</dt><dd>{{ rma.inspected_at|localtime('%b %d, %Y') }}</dd>
+        {% if rma.complaint_match %}<dt>Matches reported concern</dt><dd>{{ {'yes': 'Yes', 'partly': 'Partly', 'no': 'No'}[rma.complaint_match] }}</dd>{% endif %}
+        <dt>Problems found</dt><dd>{{ rma.problem_summary or 'None' }}</dd>
+      </dl>
+      {% if rma.inspection %}
+      <table class="report-points">
+        <thead><tr><th>Inspection point</th><th>Result</th><th>Note</th></tr></thead>
+        <tbody>
+          {% for p in rma.inspection %}
+          <tr class="r-{{ p.result }}">
+            <td>{{ p.label }}</td>
+            <td><span class="result">{{ {'ok': 'OK', 'issue': 'Issue', 'na': 'N/A'}.get(p.result, p.result) }}</span></td>
+            <td>{{ p.note or '' }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      <p class="report-small">{{ rma.inspection|length }} points checked, {{ issues|length }} with issues.</p>
+      {% endif %}
+      {% else %}<p class="empty">Not inspected yet.</p>{% endif %}
+    </section>
+
+    <section class="report-section">
+      <h2><span class="num">3</span> Repairs</h2>
+      {% if rma.repaired_at %}
+      <dl class="report-dl">
+        <dt>Date</dt><dd>{{ rma.repaired_at|localtime('%b %d, %Y') }}</dd>
+        <dt>Repairs done</dt><dd>{{ rma.solution_summary or '—' }}</dd>
+        {% if rma.work_done %}<dt>Work notes</dt><dd>{{ rma.work_done }}</dd>{% endif %}
+        {% if rma.parts_used %}<dt>Parts used</dt><dd>{{ rma.parts_used }}</dd>{% endif %}
+        {% if rma.trigger_pull_after is not none %}<dt>Trigger pull</dt><dd>{{ '%g'|format(rma.trigger_pull_after|float) }} lb{% if rma.trigger_pull_found is not none %} (was {{ '%g'|format(rma.trigger_pull_found|float) }} lb){% endif %}</dd>{% endif %}
+      </dl>
+      {% else %}<p class="empty">Repair not complete yet.</p>{% endif %}
+    </section>
+
+    <section class="report-section">
+      <h2><span class="num">4</span> Accuracy test</h2>
+      {% if rma.tested_at %}
+        {% if rma.test_required is false %}
+        <dl class="report-dl"><dt>Date</dt><dd>{{ rma.tested_at|localtime('%b %d, %Y') }}</dd><dt>Result</dt><dd>Not required for this repair</dd></dl>
+        {% else %}
+        <dl class="report-dl">
+          <dt>Date</dt><dd>{{ rma.tested_at|localtime('%b %d, %Y') }}</dd>
+          <dt>Result</dt><dd><span class="test-result {{ rma.test_result }}">{{ 'Pass' if rma.test_result == 'pass' else 'Fail' }}</span></dd>
+          {% if rma.group_size is not none %}<dt>Group size</dt><dd>{{ '%g'|format(rma.group_size|float) }}{{ ' MOA' if rma.group_unit == 'moa' else '"' }}{% if rma.test_distance %} at {{ rma.test_distance }} yards{% endif %}</dd>{% endif %}
+          {% if rma.test_ammo %}<dt>Ammunition</dt><dd>{{ rma.test_ammo }}</dd>{% endif %}
+        </dl>
+        {% endif %}
+      {% else %}<p class="empty">Not tested yet.</p>{% endif %}
+    </section>
+
+    <section class="report-section">
+      <h2><span class="num">5</span> Return shipment</h2>
+      {% if rma.shipped_at %}
+      <dl class="report-dl">
+        <dt>Shipped</dt><dd>{{ rma.shipped_at|localtime('%b %d, %Y') }}</dd>
+        {% if rma.function_check %}<dt>Final safety &amp; function check</dt><dd>{{ 'Passed' if rma.function_check == 'pass' else 'Not passed' }}</dd>{% endif %}
+        <dt>Tracking number</dt><dd class="mono">{{ rma.tracking_number or '—' }}{% if rma.return_carrier %} ({{ rma.return_carrier }}){% endif %}</dd>
+        {% if rma.delivered_at %}<dt>Delivered</dt><dd>{{ rma.delivered_at|localtime('%b %d, %Y') }}</dd>{% endif %}
+      </dl>
+      {% else %}<p class="empty">Not shipped yet.</p>{% endif %}
+    </section>
+
+    <footer class="sheet-footer report-foot">
+      Questions about this repair? Reply to your support ticket #{{ ticket.id }}.
+    </footer>
+  </article>
+</body>
+</html>
