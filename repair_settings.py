@@ -18,10 +18,17 @@ FIELD_ROLES = (
     ("caliber", "Caliber", r"caliber|calibre|cartridge|chambering"),
     ("part_number", "Part number / SKU", r"\bsku\b|part\s*(no|num|#)|item\s*(no|num|#)"),
     ("inbound_tracking", "Inbound tracking number", r"tracking"),
+    # For the ATF A&D log: where the rifle came from and goes back to.
+    ("address", "Customer address (A&D log)", r"address"),
+    ("ffl", "Dealer FFL number (A&D log)", r"\bffl\b"),
 )
 _SKIP_FOR_INBOUND = re.compile(r"return|outbound|ship\s*back", re.I)
+_SKIP_FOR_ADDRESS = re.compile(r"e-?mail|\bip\b|web", re.I)
 
 DEFAULTS = {
+    # ATF A&D log: written on every new entry (the officer can edit an entry)
+    "atf_manufacturer": "Christensen Arms",
+    "atf_firearm_type": "Rifle",
     "delivered_auto": "1",
     "delivered_zendesk_value": "",
     "delivered_message": (
@@ -87,6 +94,8 @@ def resolve_roles(fields_map: dict[int, dict[str, Any]], settings: dict[str, str
                 continue
             if role == "inbound_tracking" and _SKIP_FOR_INBOUND.search(title):
                 continue
+            if role == "address" and _SKIP_FOR_ADDRESS.search(title):
+                continue
             if fid in chosen.values():
                 continue
             chosen[role] = fid
@@ -108,6 +117,7 @@ def ticket_snapshot(ticket: dict[str, Any], fields_map: dict[int, dict[str, Any]
         options = {o["value"]: o["name"] for o in (fields_map.get(fid) or {}).get("custom_field_options", [])}
         if isinstance(value, list):
             value = ", ".join(str(options.get(v, v)) for v in value)
-        snap[f"zd_{role}"] = " ".join(str(options.get(value, value)).split())[:200]
+        limit = 500 if role == "address" else 200
+        snap[f"zd_{role}"] = " ".join(str(options.get(value, value)).split())[:limit]
     snap["ticket_fields"] = resolve_custom_fields(ticket, fields_map)
     return snap

@@ -1164,3 +1164,59 @@ button:disabled, .primary-btn:disabled, .action-btn:disabled, .small-btn:disable
 .final-table td { vertical-align: middle; }
 .reset-row { display: flex; gap: 16px; flex-wrap: wrap; }
 .scan-results { margin-top: 20px; }
+
+/* ---------- ATF A&D log ---------- */
+.kpi-link { text-decoration: none; color: inherit; }
+.kpi-link:hover { background: #FAF9F6; }
+.kpi-warn .kpi-value { color: var(--accent-ink, #8A2A12); }
+.ad-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 22px;
+  align-items: center;
+  border-bottom: 1px solid var(--line);
+  margin: 0 0 18px;
+}
+.ad-tabs > a {
+  font-family: var(--font-label);
+  font-weight: 600;
+  font-size: 14px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  text-decoration: none;
+  color: var(--muted-2);
+  padding: 10px 0;
+  border-bottom: 3px solid transparent;
+  margin-bottom: -1px;
+}
+.ad-tabs > a:hover { color: var(--ink); }
+.ad-tabs > a.active { color: var(--ink); border-bottom-color: var(--brand); }
+.ad-search { margin-left: auto; display: flex; gap: 6px; padding: 6px 0; }
+.ad-search input { height: 36px; padding: 0 10px; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--surface); width: 220px; }
+.section-head .count { font-family: var(--font-display); font-size: 20px; letter-spacing: 0; margin-left: 8px; }
+.section-head .subtle { text-transform: none; letter-spacing: 0; font-family: var(--font-body); font-weight: 400; margin-left: 6px; }
+.table-scroll { overflow-x: auto; }
+.ad-table td { vertical-align: top; font-size: 14px; line-height: 1.4; }
+.ad-table td .subtle { margin-left: 0; }
+.ad-table td.num { font-family: var(--font-display); font-weight: 700; font-size: 20px; font-variant-numeric: tabular-nums; }
+.ad-table tr.needs-review td:first-child { box-shadow: inset 3px 0 0 var(--accent, #E4572E); }
+.ad-table .bad-tag, .ad-table .ok-tag { margin-left: 0; }
+.ad-entry dl { display: grid; grid-template-columns: 180px 1fr; gap: 8px 16px; margin: 0; font-size: 15px; }
+.ad-entry dt { color: var(--muted-2); }
+.ad-entry dd { margin: 0; }
+.ad-panels { display: grid; grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); gap: 20px; margin: 16px 0; }
+.ad-panel { background: var(--surface); border: 1px solid var(--line); padding: 18px 20px; }
+.ad-panel h2 { font-family: var(--font-label); font-weight: 600; font-size: 13px; text-transform: uppercase; letter-spacing: 0.14em; color: var(--muted); margin: 0 0 12px; }
+.ad-changes td { font-size: 14px; vertical-align: top; }
+.ad-changes .was { text-decoration: line-through; color: var(--muted-2); }
+.print-only { display: none; }
+@media print {
+  .print-only { display: block; }
+  .portal-main.wide { max-width: none; padding: 0; }
+  .ad-table { font-size: 11px; }
+  .ad-table th, .ad-table td { padding: 4px 6px; }
+  .ad-table td.num { font-size: 13px; }
+  .kpi-row { margin: 8px 0; }
+  .kpi { padding: 6px 10px; }
+  .kpi-value { font-size: 22px; }
+}
