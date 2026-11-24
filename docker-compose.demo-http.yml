@@ -1,0 +1,6 @@
+# Plain-HTTP demo (DEMO_HTTPS=0 ./run_demo.sh): the app is published directly.
+# The demo password travels unencrypted, so prefer the HTTPS file.
+services:
+  demo-app:
+    ports:
+      - "${DEMO_PUBLIC_PORT:-80}:5000"

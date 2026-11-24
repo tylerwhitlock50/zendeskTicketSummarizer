@@ -1,0 +1,26 @@
+# HTTPS for the demo (added by run_demo.sh by default).
+# Caddy gets a real Let's Encrypt certificate for DEMO_DOMAIN (by default
+# <droplet-ip-with-dashes>.sslip.io, a free name that points at the droplet),
+# redirects http:// to https://, and forwards to the app, which is not
+# published itself. Certificates live in the caddy_data volume, which
+# "run_demo.sh stop" keeps so a quick restart doesn't ask for a new one.
+services:
+  demo-https:
+    image: caddy:2
+    command: caddy reverse-proxy --from ${DEMO_DOMAIN:?run ./run_demo.sh} --to demo-app:5000 ${DEMO_CADDY_FLAGS:-}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - caddy_data:/data
+    depends_on:
+      - demo-app
+    restart: unless-stopped
+
+  demo-app:
+    environment:
+      DEMO_BEHIND_PROXY: "1"   # trust Caddy's X-Forwarded-For/Proto; HTTPS-only cookies
+
+volumes:
+  caddy_data:

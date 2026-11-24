@@ -103,20 +103,28 @@ $env:DEMO_DATABASE_URL = "postgresql://postgres:portal_dev@localhost:5433/portal
 venv\Scripts\python tests\demo_server.py   # http://localhost:5055
 ```
 
-To show it to people from a server (for example a throwaway droplet), use
-`run_demo.sh`. It asks for a password that every visitor must enter, turns
-on the firewall (SSH and the demo port only) and fail2ban, and starts the demo
-with its own throwaway database (not published to the internet; your real
-`.env` is never read):
+To show it to people from a server (for example a throwaway DigitalOcean
+droplet), clone the repo and run `run_demo.sh`. On a fresh Ubuntu droplet it:
+
+- installs Docker and Compose v2 if they're missing;
+- asks for a password that every visitor must enter (or generates one);
+- turns on the firewall (SSH, 80 and 443 only) and fail2ban for SSH;
+- starts the demo with its own throwaway database (never published; your real
+  `.env` is never read) behind **HTTPS**: Caddy gets a real certificate for
+  `<droplet-ip-with-dashes>.sslip.io`, a free name that points at the droplet;
+- waits until the site answers, then prints the address.
 
 ```bash
-sudo ./run_demo.sh          # start (port 80; DEMO_PUBLIC_PORT=8080 to change)
-sudo ./run_demo.sh logs     # follow the log
-sudo ./run_demo.sh stop     # stop and delete the demo database
+sudo ./run_demo.sh            # start or restart; prints https://…sslip.io/incoming
+sudo ./run_demo.sh status     # is it up?
+sudo ./run_demo.sh logs       # follow the logs
+sudo ./run_demo.sh stop       # stop; the demo database is deleted (certificate kept)
+sudo ./run_demo.sh purge      # stop and delete the saved certificate too
 ```
 
-The password travels over plain HTTP, which is fine for a short demo; use
-HTTPS for anything longer.
+As root you can set options in front of the command: your own domain with
+`DEMO_DOMAIN=demo.example.com ./run_demo.sh` (point its DNS at the droplet
+first), or plain HTTP with `DEMO_HTTPS=0 ./run_demo.sh`.
 
 ## Deploy with Docker
 
