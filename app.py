@@ -29,11 +29,13 @@ import db
 from admin_views import admin_bp
 from portal_views import portal_bp
 from report_views import report_bp
+from atf_views import atf_bp
 
 app.config["MAX_CONTENT_LENGTH"] = 120 * 1024 * 1024  # several phone photos per post
 app.register_blueprint(portal_bp)
 app.register_blueprint(admin_bp)
 app.register_blueprint(report_bp)
+app.register_blueprint(atf_bp)
 app.before_request(auth.check_csrf)
 
 

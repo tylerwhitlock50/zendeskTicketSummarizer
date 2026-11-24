@@ -16,6 +16,7 @@ import psycopg
 from psycopg.types.json import Jsonb
 from werkzeug.security import check_password_hash, generate_password_hash
 
+import atf_log
 from db import _conn
 
 STAGE_KEYS = ("received", "inspected", "repaired", "tested", "shipped")
@@ -247,7 +248,8 @@ STAGE_COLUMNS = {
 }
 
 # Copied from the Zendesk ticket (see update_snapshot).
-SNAPSHOT_COLUMNS = ("zd_serial", "zd_model", "zd_caliber", "zd_part_number", "zd_inbound_tracking")
+SNAPSHOT_COLUMNS = ("zd_serial", "zd_model", "zd_caliber", "zd_part_number", "zd_inbound_tracking",
+                    "zd_address", "zd_ffl")
 
 
 def get_rma(ticket_id: int) -> Optional[dict[str, Any]]:
@@ -297,7 +299,7 @@ def add_rma(
 def _write_snapshot(conn: psycopg.Connection, ticket_id: int, snap: dict[str, Any]) -> None:
     conn.execute(
         "UPDATE repair.rma SET zd_serial = %s, zd_model = %s, zd_caliber = %s, zd_part_number = %s, "
-        "zd_inbound_tracking = %s, ticket_fields = %s WHERE ticket_id = %s",
+        "zd_inbound_tracking = %s, zd_address = %s, zd_ffl = %s, ticket_fields = %s WHERE ticket_id = %s",
         (*(snap.get(c) for c in SNAPSHOT_COLUMNS), Jsonb(snap.get("ticket_fields") or []), ticket_id),
     )
 
@@ -447,6 +449,7 @@ def record_stage(
             customer_message,
         ),
     )
+    atf_log.on_stage(conn, ticket_id, key, current_stage, tech)
 
 
 # ---------------------------------------------------------------- delivery

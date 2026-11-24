@@ -23,6 +23,7 @@
       {% set waiting = reports_waiting() %}
       <a href="{{ url_for('portal.final_reports') }}" class="{{ 'active' if ep in ('portal.final_reports', 'portal.final_report') }}">Final reports{% if waiting %} <span class="nav-count" title="{{ waiting }} ready to review and send">{{ waiting }}</span>{% endif %}</a>
       <a href="{{ url_for('report.weekly') }}" class="{{ 'active' if ep.startswith('report.') }}">Weekly report</a>
+      <a href="{{ url_for('atf.log') }}" class="{{ 'active' if ep.startswith('atf.') }}">A&amp;D log</a>
       <a href="{{ url_for('admin.settings') }}" class="{{ 'active' if ep.startswith('admin.') }}">Settings</a>
       <a href="{{ url_for('index') }}" class="nav-aside">Ticket print</a>
     </span>
