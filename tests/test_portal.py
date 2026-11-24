@@ -1500,6 +1500,173 @@ def test_report_and_csv_include_qc_fields(client, zd, tech):
     assert "Ridgeline" in csv_text and "CA12345" in csv_text
 
 
+# ---------------------------------------------------------------- ATF A&D log
+
+import atf_log  # noqa: E402
+
+ZD_ADDRESS = [{"id": 306, "value": "12 Elk Rd, Gunnison CO 81230"}]
+
+
+def _ad_fields(zd):
+    zd.fields[306] = {"id": 306, "title": "Shipping address", "active": True}
+    zd.fields[307] = {"id": 307, "title": "Requester email address", "active": True}
+    zd.fields[308] = {"id": 308, "title": "Dealer FFL", "active": True}
+
+
+@needs_db
+def test_ad_received_opens_and_shipped_closes_entry(client, zd, tech, monkeypatch):
+    monkeypatch.setattr(portal_views, "DUPLICATE_WINDOW_SECONDS", 0)
+    _ad_fields(zd)
+    zd.custom_fields = ZD_ADDRESS + [{"id": 307, "value": "jane@example.com"},
+                                     {"id": 308, "value": "9-84-000-01-2A-12345"}]
+    _add(client)
+    assert atf_log.on_hand() == []  # added to the queue, not yet in the building
+    client.post("/t/500/stage/received", data={**RECEIVED, "inbound_tracking": "1Z999AA10123456784"})
+    [e] = atf_log.on_hand()
+    assert e["serial_number"] == "CA12345" and e["model"] == "Ridgeline" and e["caliber"] == "6.5 Creedmoor"
+    assert e["manufacturer"] == "Christensen Arms" and e["firearm_type"] == "Rifle"
+    assert e["acquired_from_name"] == "Jane Hunter" and e["acquired_by"] == "Kyler"
+    assert e["acquired_from_address"] == "12 Elk Rd, Gunnison CO 81230"  # not the email-address field
+    assert e["acquired_from_ffl"] == "9-84-000-01-2A-12345" and e["review_note"] is None
+    assert e["acquired_tracking"] == "1Z999AA10123456784"
+
+    client.post("/t/500/stage/shipped", data={**SHIPPED, "tracking_number": "1Z999AA10123456785"})
+    assert atf_log.on_hand() == []
+    [e] = atf_log.entries_for_ticket(500)
+    assert e["disposed_at"] is not None and e["disposed_to_name"] == "Jane Hunter"
+    assert e["disposed_to_address"] == "12 Elk Rd, Gunnison CO 81230"
+    assert e["disposed_serial"] == "CA12345" and e["disposed_tracking"] == "1Z999AA10123456785"
+    assert e["disposed_by"] == "Kyler"
+    today = repair_db_today()
+    tz = repair_db.REPORT_TZ
+    assert [r["id"] for r in atf_log.acquisitions(today, today, tz)] == [e["id"]]
+    assert [r["id"] for r in atf_log.dispositions(today, today, tz)] == [e["id"]]
+    assert atf_log.counts(today, today, tz) == {"on_hand": 0, "acquired": 1, "disposed": 1, "needs_review": 0}
+
+    # Re-posting Shipped with a new label corrects the disposition, keeps its date, and logs it.
+    first = e["disposed_at"]
+    client.post("/t/500/stage/shipped", data={**SHIPPED, "tracking_number": "1Z999AA10123456786"})
+    [e] = atf_log.entries_for_ticket(500)
+    assert e["disposed_at"] == first and e["disposed_tracking"] == "1Z999AA10123456786"
+    [c] = atf_log.changes_for(e["id"])
+    assert c["before"] == {"disposed_tracking": "1Z999AA10123456785"} and c["changed_by"] == "Kyler"
+
+
+@needs_db
+def test_ad_received_repost_corrects_instead_of_duplicating(client, zd, tech, monkeypatch):
+    monkeypatch.setattr(portal_views, "DUPLICATE_WINDOW_SECONDS", 0)
+    _add(client)
+    client.post("/t/500/stage/received", data={**RECEIVED, "serial_number": "CA12354"})
+    client.post("/t/500/stage/received", data=RECEIVED)  # typo fixed
+    [e] = atf_log.entries_for_ticket(500)
+    assert e["serial_number"] == "CA12345" and e["disposed_at"] is None
+    [c] = atf_log.changes_for(e["id"])
+    assert c["before"] == {"serial_number": "CA12354"} and c["after"] == {"serial_number": "CA12345"}
+    assert e["review_note"].startswith("No customer address")  # no address field on this ticket
+
+
+@needs_db
+def test_ad_move_back_from_shipped(client, zd, tech, monkeypatch):
+    monkeypatch.setattr(portal_views, "DUPLICATE_WINDOW_SECONDS", 0)
+    _add(client)
+    client.post("/t/500/stage/received", data=RECEIVED)
+    client.post("/t/500/stage/shipped", data={**SHIPPED, "tracking_number": "1Z999AA10123456784"})
+    # Shipped by mistake: moving back to a repair stage clears the disposition (it never left).
+    client.post("/t/500/stage/inspected", data={**inspected(), "problem_ids": [_choice("problem", "Trigger")["id"]],
+                                                "move_back": "1"})
+    [e] = atf_log.entries_for_ticket(500)
+    assert e["disposed_at"] is None and e["disposed_tracking"] is None
+    [c] = atf_log.changes_for(e["id"])
+    assert "Moved back from Shipped" in c["reason"] and c["before"]["disposed_tracking"] == "1Z999AA10123456784"
+    client.post("/t/500/stage/shipped", data={**SHIPPED, "tracking_number": "1Z999AA10123456785"})
+    [e] = atf_log.entries_for_ticket(500)
+    assert e["disposed_tracking"] == "1Z999AA10123456785"
+    # The customer sends it back: Received again is a new acquisition; the first entry stays closed.
+    client.post("/t/500/stage/received", data={**RECEIVED, "move_back": "1"})
+    newer, older = atf_log.entries_for_ticket(500)
+    assert newer["disposed_at"] is None and older["disposed_at"] is not None
+    assert [r["id"] for r in atf_log.on_hand()] == [newer["id"]]
+
+
+@needs_db
+def test_ad_shipped_without_received_is_flagged(client, zd, tech):
+    zd.custom_fields = ZD_RIFLE
+    _add(client)
+    client.post("/t/500/stage/shipped",
+                data={**SHIPPED, "ship_serial": "CA-12345", "tracking_number": "1Z999AA10123456784"})
+    [e] = atf_log.entries_for_ticket(500)
+    assert e["disposed_at"] is not None and e["serial_number"] == "CA-12345"
+    assert "without a Received scan" in e["review_note"]
+
+
+@needs_db
+def test_ad_pages_csv_search_and_officer_edit(client, zd, tech, monkeypatch):
+    monkeypatch.setattr(portal_views, "DUPLICATE_WINDOW_SECONDS", 0)
+    _add(client)
+    client.post("/t/500/stage/received", data=RECEIVED)
+    _add(client, 501)
+    client.post("/t/501/stage/received", data={**RECEIVED, "serial_number": "CA77777"})
+    client.post("/t/501/stage/shipped",
+                data={**SHIPPED, "ship_serial": "CA77777", "tracking_number": "1Z999AA10123456784"})
+
+    page = client.get("/ad/").data.decode()
+    assert "In the building now" in page and "CA12345" in page and "CA77777" not in page
+    book = client.get("/ad/?view=book").data.decode()
+    assert "CA12345" in book and "CA77777" in book
+    found = client.get("/ad/?q=ca-777").data.decode()
+    assert "CA77777" in found and "CA12345" not in found
+    assert "CA77777" in client.get("/ad/?q=501").data.decode()
+
+    csv_text = client.get("/ad/log.csv?view=book").data.decode("utf-8-sig")
+    header = csv_text.splitlines()[0]
+    assert header.startswith("entry_id,ticket_id,manufacturer,model,caliber,type,serial_number,acquired_at")
+    assert "CA77777" in csv_text and "Disposed" in csv_text and "In building" in csv_text
+
+    [e] = atf_log.entries_for_ticket(500)
+    assert e["review_note"]
+    entry_page = client.get(f"/ad/{e['id']}").data.decode()
+    assert "Correct this entry" in entry_page and "No corrections" in entry_page
+
+    resp = client.post(f"/ad/{e['id']}", data={"acquired_from_address": "12 Elk Rd", "reason": ""},
+                       follow_redirects=True)
+    assert b"Say why" in resp.data and atf_log.get_entry(e["id"])["acquired_from_address"] is None
+    client.post(f"/ad/{e['id']}", data={"acquired_from_address": "12 Elk Rd, Gunnison CO",
+                                        "disposed_to_name": "Someone else",  # not shipped: ignored
+                                        "reason": "From the box label", "clear_review": "1"})
+    e2 = atf_log.get_entry(e["id"])
+    assert e2["acquired_from_address"] == "12 Elk Rd, Gunnison CO" and e2["review_note"] is None
+    assert e2["disposed_to_name"] is None
+    [c] = atf_log.changes_for(e["id"])
+    assert c["reason"] == "From the box label" and c["changed_by"] == "Kyler"
+    assert set(c["after"]) == {"acquired_from_address", "review_note"}
+    assert "From the box label" in client.get(f"/ad/{e['id']}").data.decode()
+
+
+@needs_db
+def test_ad_edit_needs_settings_password_and_sign_in(client, zd, tech, monkeypatch):
+    _add(client)
+    client.post("/t/500/stage/received", data=RECEIVED)
+    [e] = atf_log.entries_for_ticket(500)
+    monkeypatch.setenv("ADMIN_PASSWORD", "s3cret")
+    resp = client.post(f"/ad/{e['id']}", data={"model": "X", "reason": "test"})
+    assert resp.status_code == 302 and "/admin/login" in resp.headers["Location"]
+    assert atf_log.get_entry(e["id"])["model"] == "Ridgeline"
+    assert b"Settings password" in client.get(f"/ad/{e['id']}").data
+    monkeypatch.setenv("ADMIN_PASSWORD", "")
+    client.post("/tech/signout")
+    resp = client.post(f"/ad/{e['id']}", data={"model": "X", "reason": "test"})
+    assert resp.status_code == 302 and atf_log.get_entry(e["id"])["model"] == "Ridgeline"
+
+
+@needs_db
+def test_ad_settings_defaults(client, zd, tech):
+    client.post("/admin/atf", data={"atf_manufacturer": "Other Maker", "atf_firearm_type": "Receiver"})
+    _add(client)
+    client.post("/t/500/stage/received", data=RECEIVED)
+    [e] = atf_log.entries_for_ticket(500)
+    assert e["manufacturer"] == "Other Maker" and e["firearm_type"] == "Receiver"
+
+
 @needs_db
 def test_demo_sample_history(client, zd, tech):
     from datetime import timedelta
@@ -1517,5 +1684,11 @@ def test_demo_sample_history(client, zd, tech):
     charts = repair_db.report_charts(today - timedelta(days=89), today)
     assert sum(charts["daily"]["shipped"]) > 50
     assert any(n for counts in charts["aging"].values() for n in counts[3:])  # some open ones are late
-    for path in ("/report/", "/queue", "/final-reports", "/t/6001", "/t/6001/report"):
+    # The A&D log has what the Received / Shipped scans would have written.
+    received = [r for r in repair_db.board(shipped_days=365).values() for r in r if r["received_at"]]
+    on_hand = atf_log.on_hand()
+    assert on_hand and all(e["acquired_from_address"] and e["serial_number"] for e in on_hand)
+    assert len(on_hand) == sum(1 for r in received if r["stage"] != "shipped")
+    assert not atf_log.needs_review()
+    for path in ("/report/", "/queue", "/final-reports", "/t/6001", "/t/6001/report", "/ad/"):
         assert client.get(path).status_code == 200, path

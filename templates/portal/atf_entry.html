@@ -1,0 +1,121 @@
+{% extends "portal/base.html" %}
+{% block title %}A&amp;D entry {{ e.serial_number or e.id }}{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>A&amp;D entry <span class="mono">{{ e.serial_number or '—' }}</span></h1>
+  <span class="range-nav no-print">
+    <a href="{{ url_for('atf.log') }}">&larr; A&amp;D log</a>
+    <a href="#" onclick="window.print(); return false;">Print</a>
+  </span>
+</div>
+<p class="tagline">Entry {{ e.id }} · ticket <a href="{{ url_for('portal.action_page', ticket_id=e.ticket_id) }}">#{{ e.ticket_id }}</a>
+  · {% if e.disposed_at %}<span class="transit-tag">disposed</span>{% else %}<span class="ok-tag">in the building</span>{% endif %}
+  {% if e.source == 'backfill' %}<span class="transit-tag" title="Rebuilt from the repair record when the A&D log was added">backfilled</span>{% endif %}
+  {% if e.source == 'manual' %}<span class="transit-tag">manual</span>{% endif %}</p>
+
+{% if e.review_note %}<div class="notice warn">Needs review: {{ e.review_note }}</div>{% endif %}
+
+<div class="ad-panels ad-entry">
+  <section class="ad-panel">
+    <h2>Firearm</h2>
+    <dl>
+      <dt>Manufacturer</dt><dd>{{ e.manufacturer or '—' }}</dd>
+      <dt>Model</dt><dd>{{ e.model or '—' }}</dd>
+      <dt>Caliber</dt><dd>{{ e.caliber or '—' }}</dd>
+      <dt>Type</dt><dd>{{ e.firearm_type or '—' }}</dd>
+      <dt>Serial number</dt><dd class="mono">{{ e.serial_number or '—' }}</dd>
+    </dl>
+  </section>
+  <section class="ad-panel">
+    <h2>Acquisition</h2>
+    <dl>
+      <dt>Date</dt><dd>{{ e.acquired_at|localtime('%Y-%m-%d %I:%M %p') }}</dd>
+      <dt>Received from</dt><dd>{{ e.acquired_from_name or '—' }}</dd>
+      <dt>Address</dt><dd>{{ e.acquired_from_address or '—' }}</dd>
+      <dt>FFL</dt><dd>{{ e.acquired_from_ffl or '—' }}</dd>
+      <dt>Inbound tracking</dt><dd class="mono">{{ e.acquired_tracking or '—' }}</dd>
+      <dt>Scanned in by</dt><dd>{{ e.acquired_by or '—' }}</dd>
+    </dl>
+  </section>
+  <section class="ad-panel">
+    <h2>Disposition</h2>
+    {% if e.disposed_at %}
+    <dl>
+      <dt>Date</dt><dd>{{ e.disposed_at|localtime('%Y-%m-%d %I:%M %p') }}</dd>
+      <dt>Shipped to</dt><dd>{{ e.disposed_to_name or '—' }}</dd>
+      <dt>Address</dt><dd>{{ e.disposed_to_address or '—' }}</dd>
+      <dt>FFL</dt><dd>{{ e.disposed_to_ffl or '—' }}</dd>
+      <dt>Serial at pack-out</dt><dd class="mono">{{ e.disposed_serial or '—' }}</dd>
+      <dt>Return tracking</dt><dd class="mono">{{ e.disposed_tracking or '—' }}{% if e.disposed_carrier %} ({{ e.disposed_carrier|upper }}){% endif %}</dd>
+      <dt>Shipped by</dt><dd>{{ e.disposed_by or '—' }}</dd>
+    </dl>
+    {% else %}
+    <p class="empty">Still in the building ({{ '%.0f'|format(e.days_held|float) }} days).</p>
+    {% endif %}
+  </section>
+</div>
+{% if e.notes %}<p><strong>Notes:</strong> {{ e.notes }}</p>{% endif %}
+
+<h2 class="section-head">Corrections <span class="count">{{ changes|length }}</span></h2>
+<table class="report-table ad-changes">
+  <thead><tr><th>When</th><th>Who</th><th>Why</th><th>What changed</th></tr></thead>
+  <tbody>
+  {% for c in changes %}
+    <tr>
+      <td>{{ c.changed_at|localtime('%Y-%m-%d %I:%M %p') }}</td>
+      <td>{{ c.changed_by or '—' }}</td>
+      <td>{{ c.reason }}</td>
+      <td>{% for k, v in c.after.items() %}
+        <div>{{ labels.get(k, k) }}: <span class="was">{{ c.before.get(k) if c.before.get(k) is not none else '(blank)' }}</span> → {{ v if v is not none else '(blank)' }}</div>
+      {% else %}—{% endfor %}</td>
+    </tr>
+  {% else %}
+    <tr><td colspan="4" class="empty">No corrections. This is the entry as first recorded.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+
+<section class="no-print">
+<h2 class="section-head">Correct this entry</h2>
+{% if not can_edit %}
+<p class="tagline">Corrections need the Settings password. <a href="{{ url_for('admin.login', next=request.path) }}">Unlock</a></p>
+{% elif not tech %}
+<p class="tagline">Sign in with your name and PIN so the correction is kept under your name.
+  <a href="{{ url_for('portal.tech_signin', next=request.path) }}">Sign in</a></p>
+{% else %}
+<p class="tagline">Change only what is wrong or missing. The old values stay in the corrections list above with your name and reason.
+  {% if not e.disposed_at %}Disposition fields can be filled in once it ships.{% endif %}</p>
+<form method="post" action="{{ url_for('atf.edit', entry_id=e.id) }}" class="admin-row">
+  {{ csrf_field() }}
+  <div class="admin-grid">
+    <label>Manufacturer <input type="text" name="manufacturer" value="{{ e.manufacturer or '' }}" maxlength="120"></label>
+    <label>Model <input type="text" name="model" value="{{ e.model or '' }}" maxlength="120"></label>
+    <label>Caliber <input type="text" name="caliber" value="{{ e.caliber or '' }}" maxlength="120"></label>
+    <label>Type <input type="text" name="firearm_type" value="{{ e.firearm_type or '' }}" maxlength="120"></label>
+    <label>Serial number <input type="text" name="serial_number" value="{{ e.serial_number or '' }}" maxlength="120" class="mono"></label>
+  </div>
+  <div class="admin-grid">
+    <label>Received from <input type="text" name="acquired_from_name" value="{{ e.acquired_from_name or '' }}" maxlength="120"></label>
+    <label>From FFL <input type="text" name="acquired_from_ffl" value="{{ e.acquired_from_ffl or '' }}" maxlength="120"></label>
+    <label>Inbound tracking <input type="text" name="acquired_tracking" value="{{ e.acquired_tracking or '' }}" maxlength="120"></label>
+    <label class="wide">From address <textarea name="acquired_from_address" rows="2" maxlength="500">{{ e.acquired_from_address or '' }}</textarea></label>
+  </div>
+  {% if e.disposed_at %}
+  <div class="admin-grid">
+    <label>Shipped to <input type="text" name="disposed_to_name" value="{{ e.disposed_to_name or '' }}" maxlength="120"></label>
+    <label>To FFL <input type="text" name="disposed_to_ffl" value="{{ e.disposed_to_ffl or '' }}" maxlength="120"></label>
+    <label>Return tracking <input type="text" name="disposed_tracking" value="{{ e.disposed_tracking or '' }}" maxlength="120"></label>
+    <label class="wide">To address <textarea name="disposed_to_address" rows="2" maxlength="500">{{ e.disposed_to_address or '' }}</textarea></label>
+  </div>
+  {% endif %}
+  <div class="admin-grid">
+    <label class="wide">Notes <textarea name="notes" rows="2" maxlength="500">{{ e.notes or '' }}</textarea></label>
+    <label class="wide">Reason for the change <span class="subtle">required; kept with the change</span>
+      <input type="text" name="reason" required maxlength="300" placeholder="e.g. Address from the customer's shipping label"></label>
+    {% if e.review_note %}<label class="check wide"><input type="checkbox" name="clear_review" value="1"> Reviewed: clear “{{ e.review_note }}”</label>{% endif %}
+  </div>
+  <button type="submit">Save correction</button>
+</form>
+{% endif %}
+</section>
+{% endblock %}

@@ -1,0 +1,134 @@
+{% extends "portal/base.html" %}
+{% block title %}A&amp;D log{% endblock %}
+{% block main_class %}wide{% endblock %}
+{% block content %}
+{% set view_label = dict(views)[view] %}
+{% set dated = view in ('acquisitions', 'dispositions', 'book') and not q %}
+<div class="page-head">
+  <h1>A&amp;D log</h1>
+  <span class="range-nav no-print">
+    <a href="#" onclick="window.print(); return false;">Print</a>
+    <a href="{{ url_for('atf.log_csv', view=view, start=start, end=end, q=q or None) }}">Download CSV</a>
+  </span>
+</div>
+<p class="tagline no-print">Every firearm that comes through the repair portal: when it arrived and from whom
+  (the <strong>Received</strong> scan), and when it left and to whom (the <strong>Shipped</strong> scan).
+  Entries are never deleted; corrections are kept with who made them and why.</p>
+
+{% if rows is none %}
+<div class="notice warn">Database not configured. Set <code>DATABASE_URL</code> and run migrations.</div>
+{% else %}
+
+<div class="kpi-row">
+  <a class="kpi kpi-link" href="{{ url_for('atf.log', view='on_hand') }}">
+    <span class="kpi-label">In the building now</span>
+    <span class="kpi-value">{{ counts.on_hand }}</span>
+    <span class="kpi-delta">as of {{ today.strftime('%b %d, %Y') }}</span>
+  </a>
+  <a class="kpi kpi-link" href="{{ url_for('atf.log', view='acquisitions', start=start, end=end) }}">
+    <span class="kpi-label">Acquired</span>
+    <span class="kpi-value">{{ counts.acquired }}</span>
+    <span class="kpi-delta">{{ start.strftime('%b %d') }} – {{ end.strftime('%b %d, %Y') }}</span>
+  </a>
+  <a class="kpi kpi-link" href="{{ url_for('atf.log', view='dispositions', start=start, end=end) }}">
+    <span class="kpi-label">Disposed</span>
+    <span class="kpi-value">{{ counts.disposed }}</span>
+    <span class="kpi-delta">{{ start.strftime('%b %d') }} – {{ end.strftime('%b %d, %Y') }}</span>
+  </a>
+  <a class="kpi kpi-link {{ 'kpi-warn' if counts.needs_review }}" href="{{ url_for('atf.log', view='review') }}">
+    <span class="kpi-label">Needs review</span>
+    <span class="kpi-value">{{ counts.needs_review }}</span>
+    <span class="kpi-delta">{{ 'missing an address or date' if counts.needs_review else 'all complete' }}</span>
+  </a>
+</div>
+
+<nav class="ad-tabs no-print" aria-label="Log views">
+  {% for key, label in views %}
+  <a href="{{ url_for('atf.log', view=key, start=start, end=end) }}" class="{{ 'active' if key == view and not q }}">{{ label }}</a>
+  {% endfor %}
+  <form method="get" class="ad-search">
+    <input type="hidden" name="view" value="{{ view }}">
+    <input type="search" name="q" value="{{ q }}" placeholder="Serial or ticket #" aria-label="Search by serial or ticket number">
+    <button type="submit">Search</button>
+  </form>
+</nav>
+
+{% if view in ('acquisitions', 'dispositions', 'book') and not q %}
+<form method="get" class="range-form no-print">
+  <input type="hidden" name="view" value="{{ view }}">
+  <label>From <input type="date" name="start" value="{{ start }}"></label>
+  <label>To <input type="date" name="end" value="{{ end }}"></label>
+  <button type="submit">Show</button>
+  <span class="range-presets">
+    {% for label, p_start, p_end in presets %}
+    <a href="{{ url_for('atf.log', view=view, start=p_start, end=p_end) }}"
+       class="{{ 'active' if p_start == start and p_end == end }}">{{ label }}</a>
+    {% endfor %}
+  </span>
+</form>
+{% endif %}
+
+<h2 class="section-head">
+  {% if q %}Search: “{{ q }}” <a class="subtle no-print" href="{{ url_for('atf.log', view=view) }}">clear</a>
+  {% else %}{{ view_label }}{% if dated %} <span class="subtle">{{ start.strftime('%b %d, %Y') }} – {{ end.strftime('%b %d, %Y') }}</span>{% endif %}{% endif %}
+  <span class="count">{{ rows|length }}</span>
+</h2>
+{% if view == 'book' and not q %}<p class="tagline">Everything acquired or disposed in the period, plus anything held through it.</p>{% endif %}
+
+<div class="table-scroll">
+<table class="report-table ad-table">
+  <thead>
+    <tr>
+      <th>Serial</th>
+      <th>Firearm</th>
+      <th>Acquired</th>
+      <th>From</th>
+      {% if view == 'on_hand' and not q %}
+      <th>Days here</th><th>Stage</th>
+      {% else %}
+      <th>Disposed</th><th>To</th>
+      {% endif %}
+      <th>Ticket</th>
+    </tr>
+  </thead>
+  <tbody>
+  {% for e in rows %}
+    <tr class="{{ 'needs-review' if e.review_note }}">
+      <td class="mono"><a href="{{ url_for('atf.entry', entry_id=e.id) }}">{{ e.serial_number or '—' }}</a>
+        {% if e.disposed_serial and e.serial_number and e.disposed_serial|upper != e.serial_number|upper %}<br><span class="bad-tag">out: {{ e.disposed_serial }}</span>{% endif %}
+        {% if e.review_note %}<br><span class="bad-tag" title="{{ e.review_note }}">review</span>{% endif %}
+        {% if e.changes %}<br><span class="subtle">{{ e.changes }} correction{{ 's' if e.changes != 1 }}</span>{% endif %}
+      </td>
+      <td>{{ e.manufacturer or '' }} {{ e.model or '' }}<br><span class="subtle">{{ e.caliber or '' }}{% if e.firearm_type %} · {{ e.firearm_type }}{% endif %}</span></td>
+      <td>{{ e.acquired_at|localtime('%Y-%m-%d') }}<br><span class="subtle">{{ e.acquired_at|localtime('%I:%M %p') }}{% if e.acquired_by %} · {{ e.acquired_by }}{% endif %}</span></td>
+      <td>{{ e.acquired_from_name or '—' }}
+        {% if e.acquired_from_ffl %}<br><span class="subtle">FFL {{ e.acquired_from_ffl }}</span>{% endif %}
+        <br>{% if e.acquired_from_address %}<span class="subtle">{{ e.acquired_from_address }}</span>{% else %}<span class="bad-tag">no address</span>{% endif %}</td>
+      {% if view == 'on_hand' and not q %}
+      <td class="num">{{ '%.0f'|format(e.days_held|float) }}</td>
+      <td>{{ stages.get(e.rma_stage, e.rma_stage) }}</td>
+      {% else %}
+      <td>{% if e.disposed_at %}{{ e.disposed_at|localtime('%Y-%m-%d') }}<br><span class="subtle">{{ e.disposed_at|localtime('%I:%M %p') }}{% if e.disposed_by %} · {{ e.disposed_by }}{% endif %}</span>
+          {% else %}<span class="ok-tag">in building</span>{% endif %}</td>
+      <td>{% if e.disposed_at %}{{ e.disposed_to_name or '—' }}
+          {% if e.disposed_to_ffl %}<br><span class="subtle">FFL {{ e.disposed_to_ffl }}</span>{% endif %}
+          <br>{% if e.disposed_to_address %}<span class="subtle">{{ e.disposed_to_address }}</span>{% else %}<span class="bad-tag">no address</span>{% endif %}
+          {% if e.disposed_tracking %}<br><span class="subtle mono">{{ e.disposed_tracking }}</span>{% endif %}
+          {% endif %}</td>
+      {% endif %}
+      <td><a href="{{ url_for('portal.action_page', ticket_id=e.ticket_id) }}">#{{ e.ticket_id }}</a></td>
+    </tr>
+  {% else %}
+    <tr><td colspan="7" class="empty">
+      {% if q %}No entry matches “{{ q }}”.
+      {% elif view == 'on_hand' %}No firearms in the building.
+      {% elif view == 'review' %}Nothing needs review.
+      {% else %}Nothing in this period.{% endif %}
+    </td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+<p class="tagline print-only">Printed {{ today.strftime('%b %d, %Y') }} from the repair portal A&amp;D log.</p>
+{% endif %}
+{% endblock %}

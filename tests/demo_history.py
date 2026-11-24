@@ -67,6 +67,13 @@ CASES = (
      ("Trigger",), ("Replaced part",), "Manufacturing defect: machining / assembly"),
 )
 CARRIERS = (("UPS", "1Z999AA1{:010d}"), ("FedEx", "7{:011d}"), ("USPS", "94001118992{:011d}"))
+STREETS = ("Ridge Rd", "Canyon Dr", "Elk Trail", "Main St", "Pine Ave", "Sage Ln", "Juniper Way", "Bench Rd")
+TOWNS = (("Boise", "ID", "837"), ("Bozeman", "MT", "597"), ("Casper", "WY", "826"), ("Grand Junction", "CO", "815"),
+         ("Bend", "OR", "977"), ("Spokane", "WA", "992"), ("Rapid City", "SD", "577"), ("Gillette", "WY", "827"),
+         ("Twin Falls", "ID", "833"), ("Missoula", "MT", "598"), ("Prescott", "AZ", "863"), ("Elko", "NV", "898"))
+# Some rifles come in through a dealer: their FFL goes in the A&D log (made-up numbers).
+DEALERS = (("Sportsman's Outpost", "9-83-001-01-9K-01234"), ("High Country Arms", "8-84-013-07-9L-05678"),
+           ("Big Game Supply", "9-93-031-01-0A-09876"))
 
 
 def _name(rng):
@@ -74,7 +81,7 @@ def _name(rng):
 
 
 def sample_tickets():
-    """ticket_id -> dict(subject, name, complaint, model, caliber, serial, inbound): the same every run."""
+    """ticket_id -> dict(subject, name, complaint, model, caliber, serial, inbound, address, ffl): same every run."""
     rng = random.Random(4242)
     out = {}
     for i in range(150):
@@ -90,6 +97,14 @@ def sample_tickets():
             "serial": f"CA{rng.randint(10000, 99999)}",
             "inbound": "1Z999AA1{:010d}".format(rng.randint(0, 10**10 - 1)),
         }
+    # Addresses and dealers are drawn from their own sequence so the fields above stay as they were.
+    rng = random.Random(4243)
+    for t in out.values():
+        town, state, zip3 = rng.choice(TOWNS)
+        dealer = rng.choice(DEALERS) if rng.random() < 0.2 else None
+        street = f"{rng.randint(100, 9999)} {rng.choice(STREETS)}"
+        t["address"] = (f"{dealer[0]}, " if dealer else "") + f"{street}, {town}, {state} {zip3}{rng.randint(10, 99)}"
+        t["ffl"] = dealer[1] if dealer else None
     return out
 
 
@@ -134,6 +149,7 @@ def seed(dsn: str) -> int:
                 "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
                 (tid, kind, stage, label, tech[0], tech[1], Jsonb(detail or {}), when),
             )
+            return tech
 
         stage_labels = dict(cur.execute("SELECT key, label FROM repair.stage").fetchall())
         ids = sorted(tickets)
@@ -147,6 +163,24 @@ def seed(dsn: str) -> int:
         long_ago = [tid for tid, day in zip(ids, start_days) if 20 <= day <= 50]
         held = {tid: rng.choice(("inspected", "repaired")) for tid in rng.sample(long_ago, min(3, len(long_ago)))}
 
+        def atf_entry(tid, t, fields, by):
+            """The A&D log entry the Received (and Shipped) scans would have written."""
+            out = "shipped_at" in fields
+            cur.execute(
+                "INSERT INTO repair.atf_entry (ticket_id, manufacturer, model, caliber, firearm_type, serial_number, "
+                "  acquired_at, acquired_from_name, acquired_from_address, acquired_from_ffl, acquired_tracking, "
+                "  acquired_by, disposed_at, disposed_to_name, disposed_to_address, disposed_to_ffl, "
+                "  disposed_serial, disposed_tracking, disposed_carrier, disposed_by, created_at, updated_at) "
+                "VALUES (%s, 'Christensen Arms', %s, %s, 'Rifle', %s, %s, %s, %s, %s, %s, %s, "
+                "        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                (tid, t["model"], t["caliber"], t["serial"], fields["received_at"], t["name"], t["address"],
+                 t["ffl"], t["inbound"], by.get("received"),
+                 fields.get("shipped_at"), t["name"] if out else None, t["address"] if out else None,
+                 t["ffl"] if out else None, fields.get("ship_serial"), fields.get("tracking_number"),
+                 fields.get("return_carrier"), by.get("shipped"),
+                 fields["received_at"], fields.get("shipped_at") or fields["received_at"]),
+            )
+
         count = 0
         shipped = []  # (shipped_at, ticket_id)
         for tid, day in zip(ids, start_days):
@@ -156,10 +190,10 @@ def seed(dsn: str) -> int:
             adder = rng.choice(techs)
             cur.execute(
                 "INSERT INTO repair.rma (ticket_id, subject, requester_name, requester_email, added_at, added_by, "
-                " zd_serial, zd_model, zd_caliber, zd_inbound_tracking, updated_at) "
-                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                " zd_serial, zd_model, zd_caliber, zd_inbound_tracking, zd_address, zd_ffl, updated_at) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
                 (tid, t["subject"], t["name"], "customer@example.com", added, adder[1],
-                 t["serial"], t["model"], t["caliber"], t["inbound"], added),
+                 t["serial"], t["model"], t["caliber"], t["inbound"], t["address"], t["ffl"], added),
             )
             event(tid, "added", None, "Added to repair queue", added, adder)
 
@@ -168,7 +202,7 @@ def seed(dsn: str) -> int:
             gaps = {"received": rng.randint(2, 12), "inspected": rng.randint(0, 4),
                     "repaired": rng.randint(1, 8) + (rng.randint(15, 30) if stuck else 0),
                     "tested": rng.randint(0, 2), "shipped": rng.randint(0, 3)}
-            fields, when, stage = {}, added, "queued"
+            fields, when, stage, by = {}, added, "queued", {}
             for key in ("received", "inspected", "repaired", "tested", "shipped"):
                 if stage == held.get(tid):
                     fields.update(flag="Awaiting parts", flag_at=when)
@@ -229,7 +263,7 @@ def seed(dsn: str) -> int:
                     carrier, fmt = rng.choice(CARRIERS)
                     fields.update(tracking_number=fmt.format(rng.randint(0, 10**10 - 1)),
                                   return_carrier=carrier, ship_serial=t["serial"])
-                event(tid, "stage", key, stage_labels.get(key, key.title()), when)
+                by[key] = event(tid, "stage", key, stage_labels.get(key, key.title()), when)[1]
 
             if stage == "shipped":
                 delivered = fields["shipped_at"] + timedelta(days=rng.randint(2, 5))
@@ -247,6 +281,8 @@ def seed(dsn: str) -> int:
             fields["updated_at"] = when
             sets = ", ".join(f"{k} = %s" for k in fields)
             cur.execute(f"UPDATE repair.rma SET {sets} WHERE ticket_id = %s", (*fields.values(), tid))
+            if "received_at" in fields:
+                atf_entry(tid, t, fields, by)
             count += 1
 
         # Final reports went out soon after shipping, except the newest few,

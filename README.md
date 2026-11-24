@@ -43,6 +43,21 @@ and sends the emails; this app keeps the shop-side repair record.
    deliveries and work by person, with CSV downloads of RMAs (including the
    ticket's product fields, for matching to products) and all activity.
 
+8. **A&D log** (`/ad/`): the ATF acquisition & disposition record for every
+   firearm that passes through the portal. **Received** opens an entry (date,
+   serial, make/model/caliber, received from: the requester's name plus the
+   ticket's address and dealer FFL fields); **Shipped** closes it (date, shipped
+   to, serial at pack-out, tracking). Views: what's in the building now,
+   acquisitions, dispositions, the bound book for a period, entries that need
+   review (e.g. no address), and search by serial or ticket. Print or download CSV.
+   Entries are never deleted: re-posted stages and the compliance officer's
+   corrections (Settings password + name/PIN, with a reason) are kept with the
+   old and new values. Moving a shipped RMA back to a repair stage clears the
+   disposition (it never left); posting Received again opens a new entry.
+   Map the **Customer address** and **Dealer FFL number** Zendesk fields in
+   Settings, and set the manufacturer / firearm type written on new entries.
+   Only rifles scanned through the portal are in this log.
+
 People sign in on a shop device with their **name and PIN** (set up in
 Settings). They don't need Zendesk seats: posts go through the API user.
 
@@ -114,6 +129,7 @@ venv\Scripts\python app.py
 - http://localhost:5000/final-reports: final repair reports to review and send
 - http://localhost:5000/t/&lt;ticket_id&gt;: stage screen (what the QR opens)
 - http://localhost:5000/report/: weekly repair report + CSV downloads
+- http://localhost:5000/ad/: ATF A&D log (in the building, acquisitions, dispositions, bound book)
 - http://localhost:5000/admin/: Settings
 
 Keep the app on the shop network. Every form is CSRF-protected and posting

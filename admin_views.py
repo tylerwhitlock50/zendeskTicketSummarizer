@@ -239,3 +239,17 @@ def reset_message():
         repair_db.save_settings({key: repair_settings.DEFAULTS[key]})
         flash("Put back the original wording.", "success")
     return _done("delivery")
+
+
+@admin_bp.route("/atf", methods=["POST"])
+@auth.admin_required
+def save_atf():
+    """Manufacturer and firearm type written on new A&D log entries."""
+    maker = " ".join((request.form.get("atf_manufacturer") or "").split())[:120]
+    kind = " ".join((request.form.get("atf_firearm_type") or "").split())[:60]
+    if not maker or not kind:
+        flash("Manufacturer and firearm type can't be empty.", "error")
+        return _done("atf")
+    repair_db.save_settings({"atf_manufacturer": maker, "atf_firearm_type": kind})
+    flash("Saved. New A&D log entries use these; existing entries keep theirs.", "success")
+    return _done("atf")

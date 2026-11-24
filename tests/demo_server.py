@@ -90,19 +90,26 @@ DEMO_FIELDS = {
     9004: {"id": 9004, "title": "Inbound tracking number", "type": "text", "active": True},
     9005: {"id": 9005, "title": "Purchase date", "type": "date", "active": True},
     9006: {"id": 9006, "title": "Dealer", "type": "text", "active": True},
+    9007: {"id": 9007, "title": "Shipping address", "type": "textarea", "active": True},
+    9008: {"id": 9008, "title": "Dealer FFL number", "type": "text", "active": True},
 }
 DEMO_VALUES = {
-    7101: ("ridgeline_fft", "6.5 Creedmoor", "CA10042", "1Z999AA10123456784", "2024-09-14", "Sportsman's Outpost"),
-    7102: ("mesa", "7mm PRC", "CA20817", "776543219876", "2025-03-02", "High Country Arms"),
-    7103: ("mpr", "6.5 PRC", "CA31155", "9400111899223344556677", "2023-11-20", "Online"),
-    7104: ("traverse", ".300 Win Mag", "CA40990", None, "2025-06-30", "Big Game Supply"),
+    7101: ("ridgeline_fft", "6.5 Creedmoor", "CA10042", "1Z999AA10123456784", "2024-09-14", "Sportsman's Outpost",
+           "Sportsman's Outpost, 410 Main St, Bozeman, MT 59715", "9-83-001-01-9K-01234"),
+    7102: ("mesa", "7mm PRC", "CA20817", "776543219876", "2025-03-02", "High Country Arms",
+           "1820 Canyon Dr, Grand Junction, CO 81501", None),
+    7103: ("mpr", "6.5 PRC", "CA31155", "9400111899223344556677", "2023-11-20", "Online",
+           "77 Sage Ln, Bend, OR 97701", None),
+    7104: ("traverse", ".300 Win Mag", "CA40990", None, "2025-06-30", "Big Game Supply",
+           "2650 Elk Trail, Casper, WY 82601", None),
 }
 
 
 SAMPLE = demo_history.sample_tickets()
 _MODEL_VALUE = {o["name"]: o["value"] for o in DEMO_FIELDS[9001]["custom_field_options"]}
 for _tid, _t in SAMPLE.items():
-    DEMO_VALUES[_tid] = (_MODEL_VALUE.get(_t["model"]), _t["caliber"], _t["serial"], _t["inbound"], None, None)
+    DEMO_VALUES[_tid] = (_MODEL_VALUE.get(_t["model"]), _t["caliber"], _t["serial"], _t["inbound"], None, None,
+                         _t["address"], _t["ffl"])
 
 
 class DemoZendesk:
@@ -124,7 +131,7 @@ class DemoZendesk:
             subject, name, complaint = SUBJECTS.get(
                 ticket_id, (f"Repair request {ticket_id}", "Demo Customer", "Please take a look at my rifle.")
             )
-        values = DEMO_VALUES.get(ticket_id, (None,) * 6)
+        values = DEMO_VALUES.get(ticket_id, (None,) * len(DEMO_FIELDS))
         custom = [{"id": fid, "value": v} for fid, v in zip(sorted(DEMO_FIELDS), values)]
         ticket = {"id": ticket_id, "subject": subject, "status": "open", "description": complaint,
                   "updated_at": "2026-11-23T16:00:00Z", "created_at": "2026-11-18T16:00:00Z",
