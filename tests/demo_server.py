@@ -12,6 +12,8 @@ Optional settings:
                     others can reach; run_demo.sh sets it for you)
     DEMO_HOST       address to listen on, default 127.0.0.1 (0.0.0.0 inside Docker)
     DEMO_PORT       port, default 5055
+    DEMO_SAMPLE_HISTORY  0 to start with an empty repair history; by default an empty
+                    database gets ~4 months of made-up RMAs (tests/demo_history.py)
     DEMO_BEHIND_PROXY  1 when an HTTPS proxy (Caddy) is in front; see run_demo.sh
 """
 
@@ -59,6 +61,7 @@ if migrate.main() != 0:
 import app as app_module  # noqa: E402
 import portal_views  # noqa: E402
 import repair_db  # noqa: E402
+from tests import demo_history  # noqa: E402
 
 SUBJECTS = {
     7101: ("Ridgeline won't group under 2 MOA", "Sam Ortiz",
@@ -80,7 +83,8 @@ DEMO_FIELDS = {
            "custom_field_options": [{"name": "Ridgeline FFT", "value": "ridgeline_fft"},
                                     {"name": "Mesa", "value": "mesa"},
                                     {"name": "MPR", "value": "mpr"},
-                                    {"name": "Traverse", "value": "traverse"}]},
+                                    {"name": "Traverse", "value": "traverse"},
+                                    {"name": "Evoke", "value": "evoke"}]},
     9002: {"id": 9002, "title": "Caliber", "type": "text", "active": True},
     9003: {"id": 9003, "title": "Serial number", "type": "text", "active": True},
     9004: {"id": 9004, "title": "Inbound tracking number", "type": "text", "active": True},
@@ -95,6 +99,12 @@ DEMO_VALUES = {
 }
 
 
+SAMPLE = demo_history.sample_tickets()
+_MODEL_VALUE = {o["name"]: o["value"] for o in DEMO_FIELDS[9001]["custom_field_options"]}
+for _tid, _t in SAMPLE.items():
+    DEMO_VALUES[_tid] = (_MODEL_VALUE.get(_t["model"]), _t["caliber"], _t["serial"], _t["inbound"], None, None)
+
+
 class DemoZendesk:
     """Answers like Zendesk; logs posts to the console instead of sending them.
 
@@ -107,9 +117,13 @@ class DemoZendesk:
         self.next_id = 50000
 
     def get_ticket(self, ticket_id):
-        subject, name, complaint = SUBJECTS.get(
-            ticket_id, (f"Repair request {ticket_id}", "Demo Customer", "Please take a look at my rifle.")
-        )
+        if ticket_id in SAMPLE:
+            t = SAMPLE[ticket_id]
+            subject, name, complaint = t["subject"], t["name"], t["complaint"]
+        else:
+            subject, name, complaint = SUBJECTS.get(
+                ticket_id, (f"Repair request {ticket_id}", "Demo Customer", "Please take a look at my rifle.")
+            )
         values = DEMO_VALUES.get(ticket_id, (None,) * 6)
         custom = [{"id": fid, "value": v} for fid, v in zip(sorted(DEMO_FIELDS), values)]
         ticket = {"id": ticket_id, "subject": subject, "status": "open", "description": complaint,
@@ -170,6 +184,11 @@ app_module.summarize_ticket = _no_ai  # never send demo tickets to OpenAI
 
 if not repair_db.list_techs(include_inactive=True):
     repair_db.create_tech("Demo Tech", "1234")
+
+if os.environ.get("DEMO_SAMPLE_HISTORY", "1") != "0":
+    added = demo_history.seed(DSN)
+    if added:
+        print(f"Added {added} sample RMAs (about {demo_history.DAYS} days of made-up history).", flush=True)
 
 
 

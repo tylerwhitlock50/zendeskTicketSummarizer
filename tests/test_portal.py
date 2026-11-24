@@ -1498,3 +1498,24 @@ def test_report_and_csv_include_qc_fields(client, zd, tech):
                 "function_check", "delivered_at", "zendesk_fields"):
         assert col in header
     assert "Ridgeline" in csv_text and "CA12345" in csv_text
+
+
+@needs_db
+def test_demo_sample_history(client, zd, tech):
+    from datetime import timedelta
+
+    from tests import demo_history
+
+    assert demo_history.seed(TEST_DSN) == 150
+    assert demo_history.seed(TEST_DSN) == 0  # only ever fills an empty database
+    assert [t["name"] for t in repair_db.list_techs()] == ["Kyler"]  # sample techs stay off sign-in
+    assert repair_db.final_reports_ready_count() == demo_history.REPORTS_WAITING
+    assert not repair_db.rma_ids([7101, 7102, 7103, 7104])  # left for visitors to add
+    today = repair_db_today()
+    data = repair_db.report(today - timedelta(days=89), today)
+    assert data["turnaround"]["shipped"] > 50 and data["problems"] and data["techs"]
+    charts = repair_db.report_charts(today - timedelta(days=89), today)
+    assert sum(charts["daily"]["shipped"]) > 50
+    assert any(n for counts in charts["aging"].values() for n in counts[3:])  # some open ones are late
+    for path in ("/report/", "/queue", "/final-reports", "/t/6001", "/t/6001/report"):
+        assert client.get(path).status_code == 200, path
